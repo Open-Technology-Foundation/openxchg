@@ -181,7 +181,6 @@ sqlite3 xchg.db \
 
 ## Notes
 
-- The script requires root privileges and will automatically elevate using `sudo`
 - Default date is yesterday (API requires historical dates, not current day)
 - Currency codes are case-insensitive and automatically converted to uppercase
 - The UNIQUE constraint on (Date, Currency) prevents duplicate entries
