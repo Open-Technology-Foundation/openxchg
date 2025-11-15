@@ -35,7 +35,7 @@ declare -i VERBOSE=1
 
 trap '{ cleanup $?; }' EXIT
 
-vecho() { ((VERBOSE)) || return; echo "$@"; }
+vecho() { ((VERBOSE)) || return 0; echo "$@"; }
 error() { systemd-cat -t "$SCRIPT_NAME" -p err echo "$@"; echo >&2 "$@"; }
 die() { error "$*:2"; exit "${1:-1}"; }
 
@@ -146,7 +146,7 @@ main() {
   # Get base currency (default IDR) and normalize to uppercase
   base_currency="${1:-IDR}"
   base_currency="${base_currency^^}"
-  (($#)) && shift ||:
+  (($#==0)) || shift
 
   # Ensure base currency table exists (creates if needed)
   ensure_table_exists "$base_currency"
@@ -202,7 +202,7 @@ main() {
     currency_rate="${!mu:-}"  # Use :- to handle missing currencies gracefully
 
     # Skip if currency rate not available in API response
-    [[ -z "$currency_rate" ]] && continue
+    [[ -n "$currency_rate" ]] || continue
 
     # Calculate exchange rate relative to base currency
     # Example: If base=IDR and currency=USD, calculate IDR/USD ratio
