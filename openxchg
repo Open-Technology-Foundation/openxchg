@@ -1,0 +1,302 @@
+#!/bin/bash
+#
+# openxchg - Multi-currency exchange rate database manager
+#
+# Fetches exchange rates from openexchangerates.org API and stores them in
+# a SQLite database. Supports multiple base currencies with separate tables
+# for each. Currency codes are case-insensitive. Options can appear anywhere
+# in the command line (GNU-style argument parsing).
+#
+# Database: xchg.db (SQLite)
+# Tables: One table per base currency (e.g., IDR, USD, EUR, GBP)
+# Supported: 169 currencies from OpenExchange API
+#
+# Version: 1.0.0
+#
+
+set -euo pipefail
+shopt -s inherit_errexit shift_verbose extglob nullglob
+
+((EUID==0)) || { exec sudo "$0" "$@"; exit 1; }
+
+declare -r VERSION='1.0.0'
+#shellcheck disable=SC2155
+declare -r SCRIPT_PATH=$(realpath -e -- "$0")
+declare -r SCRIPT_DIR=${SCRIPT_PATH%/*} SCRIPT_NAME=${SCRIPT_PATH##*/}
+
+declare -r DB_PATH="$SCRIPT_DIR"/xchg.db
+
+declare -r OPENEXCHANGE_URL='https://openexchangerates.org/api/historical/'
+declare -- OPENEXCHANGE_API_KEY=${OPENEXCHANGE_API_KEY:-'2a9989da6985438481f9a5f3801d84d1'}
+
+declare -ar MU=( AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND BOB BRL BSD BTC BTN BWP BYN BZD CAD CDF CHF CLF CLP CNH CNY COP CRC CUC CUP CVE CZK DJF DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GGP GHS GIP GMD GNF GTQ GYD HKD HNL HRK HTG HUF IDR ILS IMP INR IQD IRR ISK JEP JMD JOD JPY KES KGS KHR KMF KPW KRW KWD KYD KZT LAK LBP LKR LRD LSL LYD MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD OMR PAB PEN PGK PHP PKR PLN PYG QAR RON RSD RUB RWF SAR SBD SCR SDG SEK SGD SHP SLL SOS SRD SSP STD STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD TWD TZS UAH UGX USD UYU UZS VND VUV WST XAF XAG XAU XCD XDR XOF XPD XPF XPT YER ZAR ZMW ZWL )
+
+declare -r TMPFILE=/tmp/"$SCRIPT_NAME"-"$RANDOM"-"$$"
+
+declare -i VERBOSE=1
+
+trap '{ cleanup $?; }' EXIT
+
+vecho() { ((VERBOSE)) || return; echo "$@"; }
+error() { systemd-cat -t "$SCRIPT_NAME" -p err echo "$@"; echo >&2 "$@"; }
+die() { error "$*:2"; exit "${1:-1}"; }
+
+#
+# ensure_table_exists - Create currency table if it doesn't exist
+#
+# Validates currency code format and API support, then creates a SQLite table
+# for the specified currency if it doesn't already exist. Each table stores
+# exchange rates with columns: id, Date, Currency, Unit, Xchg, Updated.
+#
+# Arguments:
+#   $1 - Currency code (must be 3 uppercase letters from MU array)
+#
+ensure_table_exists() {
+  local -- currency="$1"
+
+  # Validate currency code (3 uppercase letters)
+  [[ $currency =~ ^[A-Z]{3}$ ]] || die 1 "Invalid currency code: ${currency@Q} (must be 3 uppercase letters)"
+
+  # Validate currency is supported by API
+  [[ " ${MU[*]} " =~ " ${currency} " ]] || die 1 "Currency ${currency@Q} not supported by API (see MU array)"
+
+  # Check if table exists
+  local -i exists
+  exists=$(sqlite3 "$DB_PATH" \
+    "SELECT COUNT(*) FROM sqlite_master
+     WHERE type='table' AND name='$currency'" 2>/dev/null || echo 0)
+
+  if ((exists == 0)); then
+    # Create table with standard schema
+    vecho "Creating new table: $currency"
+    sqlite3 "$DB_PATH" <<EOF
+CREATE TABLE $currency (
+  id INTEGER PRIMARY KEY,
+  Date DATE NOT NULL,
+  Currency TEXT NOT NULL DEFAULT 'USD',
+  Unit INTEGER NOT NULL DEFAULT 1,
+  Xchg REAL NOT NULL DEFAULT 0.0,
+  Updated TIMESTAMP NOT NULL,
+  UNIQUE(Date, Currency)
+);
+CREATE INDEX idx_${currency}_currency ON $currency(Currency);
+CREATE INDEX idx_${currency}_updated ON $currency(Updated);
+EOF
+    vecho "Table $currency created successfully"
+  fi
+}
+
+main() {
+  local -- dte timestamp date mu base_currency
+  local -a positional_args=()
+
+  # Process command-line options (GNU-style: options can appear anywhere)
+  # Collect positional arguments and restore them after option parsing
+  while (($#)); do
+    case "${1:-}" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --version)
+        echo "$SCRIPT_NAME version $VERSION"
+        exit 0
+        ;;
+      -v|--verbose)
+        VERBOSE=1
+        ;;
+      -q|--quiet)
+        VERBOSE=0
+        ;;
+      -d|--date)
+        [[ -n "${2:-}" ]] || die 1 "Option ${1@Q} requires an argument"
+        dte=$(date +%F -d "$2" 2>/dev/null || echo '')
+        [[ -n "$dte" ]] || die 1 "Invalid date format ${2@Q}"
+        shift
+        ;;
+      -a|--apikey)
+        [[ -n "${2:-}" ]] || die 1 "Option ${1@Q} requires an argument"
+        OPENEXCHANGE_API_KEY="$2"
+        shift
+        ;;
+      --)
+        shift
+        # Collect remaining args as positional
+        while (($#)); do
+          positional_args+=("$1")
+          shift
+        done
+        break
+        ;;
+      -*)
+        die 1 "Unknown option ${1@Q}"
+        ;;
+      *)
+        # Collect non-option argument and continue parsing
+        positional_args+=("$1")
+        ;;
+    esac
+    shift
+  done
+
+  # Restore positional parameters
+  set -- "${positional_args[@]}"
+
+  # Set default date if not specified by -d option
+  [[ -n "${dte:-}" ]] || dte="$(date +%F -d yesterday)"
+
+  # Get base currency (default IDR) and normalize to uppercase
+  base_currency="${1:-IDR}"
+  base_currency="${base_currency^^}"
+  (($#)) && shift ||:
+
+  # Ensure base currency table exists (creates if needed)
+  ensure_table_exists "$base_currency"
+
+  # QUERY MODE: Display rates for specified currencies
+  if [[ -n "${1:-}" ]]; then
+    # Print header once for all queries
+    printf "%-10s  %-14s  %s\n" "Currency" "Xchg" "Date"
+    printf "%-10s  %-14s  %s\n" "----------" "--------------" "----------"
+
+    while (($#)); do
+      mu="${1^^}"
+      # Query SQLite and format output (avoid scientific notation with rtrim)
+      sqlite3 -separator '|' "$DB_PATH" \
+        "SELECT Currency,
+                rtrim(rtrim(printf('%.6f', Xchg), '0'), '.') as Xchg,
+                Date
+         FROM $base_currency
+         WHERE Date <= '$dte' AND Currency = '$mu'
+         ORDER BY Date DESC
+         LIMIT 1" | \
+      while IFS='|' read -r currency xchg date; do
+        printf "%-10s  %-14s  %s\n" "$currency" "$xchg" "$date"
+      done
+      shift
+    done
+    return 0
+  fi
+
+  # UPDATE MODE: Fetch all currencies from API and populate database
+  vecho "Base Currency: $base_currency"
+  vecho "Date: $dte"
+
+  wget -O "$TMPFILE" "$OPENEXCHANGE_URL/$dte.json?app_id=$OPENEXCHANGE_API_KEY" &>/dev/null \
+      || die 1 "Bad Date? Expired API Key? No data returned from ${OPENEXCHANGE_URL@Q}"
+
+  # Parse JSON using jq and create bash variables (e.g., USD=1.0, EUR=0.86)
+  eval "$(jq -r '.rates | to_entries[] | "\(.key)=\(.value)"' "$TMPFILE")"
+
+  date="$dte"
+  vecho ''
+
+  # Get base currency rate from API response
+  #shellcheck disable=SC2154
+  local -- base_rate_var="${base_currency}"
+  local -- base_rate="${!base_rate_var}"
+
+  [[ -n "$base_rate" ]] || die 1 "Base currency $base_currency not found in API response"
+
+  # Process each currency in the MU array
+  local -- currency_rate xchg
+  for mu in "${MU[@]}"; do
+    currency_rate="${!mu:-}"  # Use :- to handle missing currencies gracefully
+
+    # Skip if currency rate not available in API response
+    [[ -z "$currency_rate" ]] && continue
+
+    # Calculate exchange rate relative to base currency
+    # Example: If base=IDR and currency=USD, calculate IDR/USD ratio
+    xchg=$(bc <<< "scale=6; $base_rate/$currency_rate")
+
+    # Insert or replace in SQLite database table
+    sqlite3 "$DB_PATH" \
+      "INSERT OR REPLACE INTO $base_currency (Date, Currency, Unit, Xchg, Updated)
+       VALUES ('$date', '$mu', 1, $xchg, CURRENT_TIMESTAMP)"
+
+    ((VERBOSE==0)) || echo "Updated: $mu $date xchg=$xchg"
+  done
+
+  vecho ''
+  vecho "Update complete for $date with base currency $base_currency"
+}
+
+cleanup() {
+  local -i err=${1:=$?}
+  rm -f "$TMPFILE"
+  exit $err
+}
+
+usage() {
+  cat <<'ETX'
+openxchg - Multi-currency exchange rate database manager
+
+Fetches exchange rates from openexchangerates.org and stores them in SQLite.
+Each base currency gets its own table (e.g., IDR, USD, EUR, GBP). Supports
+169 currencies. Currency codes are case-insensitive. Options can appear
+anywhere in the command line.
+
+Usage: openxchg [OPTIONS] [base_currency] [CurrencyCode]...
+
+Options:
+  -h, --help          Display this help message and exit
+  --version           Display version information and exit
+  -v, --verbose       Enable verbose output (default)
+  -q, --quiet         Disable verbose output
+  -d, --date DATE     Specify date for query/update (default: yesterday)
+  -a, --apikey KEY    Use custom API key (overrides OPENEXCHANGE_API_KEY env)
+
+Arguments:
+  base_currency       Base currency (default: IDR, case-insensitive)
+  CurrencyCode        Currency codes to query (case-insensitive)
+
+Modes:
+  UPDATE: No currency codes given - fetches all rates for specified date
+  QUERY:  Currency codes given - displays rates from database
+
+Examples:
+  # Query latest rates (yesterday) - case-insensitive
+  openxchg idr usd eur gbp
+  openxchg AUD usd sgd
+
+  # Query specific date
+  openxchg -d 2025-01-01 EUR usd gbp aud
+  openxchg eur -d today usd gbp      # Options can appear anywhere
+
+  # Update database for yesterday (all 169 currencies)
+  openxchg idr                       # Updates IDR table
+  openxchg eur                       # Updates EUR table
+  openxchg gbp                       # Updates GBP table
+
+  # Update specific date
+  openxchg -d 2025-01-01 usd
+  openxchg aud -d 2020-05-15         # Options anywhere works!
+
+  # Custom API key
+  openxchg -a YOUR_KEY eur
+  OPENEXCHANGE_API_KEY=YOUR_KEY openxchg eur
+
+  # Quiet mode (no progress messages)
+  openxchg -q idr usd eur
+  openxchg -q -d yesterday eur       # Update quietly
+
+  # Version info
+  openxchg --version
+
+Output Format:
+  Currency    Xchg            Date
+  ----------  --------------  ----------
+  USD         16712           2025-11-14
+  EUR         19426.865616    2025-11-14
+  GBP         21989.647286    2025-11-14
+
+Database:
+  Location: /usr/share/okusi/getkurs/xchg.db
+  Tables:   One per base currency (IDR, USD, EUR, etc.)
+  Columns:  id, Date, Currency, Unit, Xchg, Updated
+ETX
+}
+
+main "$@"
+#fin
