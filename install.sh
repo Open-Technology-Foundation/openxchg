@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Installs openxchg multi-currency exchange rate database manager
 #
-# Usage: curl -sSL https://raw.githubusercontent.com/USERNAME/openxchg/main/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/Open-Technology-Foundation/openxchg/main/install.sh | bash
 #        or: bash install.sh
 #
 # Author: Gary Dean, Biksu Okusi
@@ -23,7 +23,7 @@ declare -r NC='\033[0m' # No Color
 # Installation configuration
 declare -r INSTALL_DIR="/usr/local/bin"
 declare -r CONFIG_DIR="${HOME}/.config/openxchg"
-declare -r REPO_URL="https://raw.githubusercontent.com/USERNAME/openxchg/main"
+declare -r REPO_URL="https://raw.githubusercontent.com/Open-Technology-Foundation/openxchg/main"
 declare -r VERSION="1.0.0"
 
 #------------------------------------------------------------------------------

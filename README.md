@@ -1,6 +1,6 @@
 # openxchg
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/USERNAME/openxchg)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/Open-Technology-Foundation/openxchg)
 [![License](https://img.shields.io/badge/license-GPL%20v3.0-green.svg)](LICENSE)
 [![Bash](https://img.shields.io/badge/bash-5.2+-orange.svg)](https://www.gnu.org/software/bash/)
 
@@ -11,10 +11,8 @@ Multi-currency exchange rate database manager that fetches historical exchange r
 ### One-Liner Install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/USERNAME/openxchg/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/Open-Technology-Foundation/openxchg/main/install.sh | bash
 ```
-
-> **Note**: Replace `USERNAME` with your GitHub username or organization
 
 ### Basic Usage
 
@@ -66,7 +64,7 @@ openxchg --latest idr usd eur
 The quick one-liner installation:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/USERNAME/openxchg/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/Open-Technology-Foundation/openxchg/main/install.sh | bash
 ```
 
 This will:
@@ -81,7 +79,7 @@ This will:
 
 1. **Clone or download the repository:**
    ```bash
-   git clone https://github.com/USERNAME/openxchg.git
+   git clone https://github.com/Open-Technology-Foundation/openxchg.git
    cd openxchg
    ```
 
@@ -620,7 +618,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ```bash
 # Clone repository
-git clone https://github.com/USERNAME/openxchg.git
+git clone https://github.com/Open-Technology-Foundation/openxchg.git
 cd openxchg
 
 # Install dependencies
@@ -674,8 +672,8 @@ This program is free software: you can redistribute it and/or modify it under th
 
 ## Links
 
-- **Documentation**: [GitHub Repository](https://github.com/USERNAME/openxchg)
-- **Issues**: [Report bugs](https://github.com/USERNAME/openxchg/issues)
+- **Documentation**: [GitHub Repository](https://github.com/Open-Technology-Foundation/openxchg)
+- **Issues**: [Report bugs](https://github.com/Open-Technology-Foundation/openxchg/issues)
 - **API Documentation**: [OpenExchangeRates API](https://docs.openexchangerates.org)
 
 ---
