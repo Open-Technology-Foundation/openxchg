@@ -1,0 +1,85 @@
+#!/bin/bash
+#
+# wget - Mock wget for API testing
+#
+# This script intercepts wget calls during testing and returns fixture data
+# instead of making real API calls. It simulates the OpenExchangeRates API.
+#
+# Usage: Automatically used when MOCK_API_ENABLED=true in test environment
+
+set -euo pipefail
+
+# Get the real wget path
+declare -r REAL_WGET="$(command -v wget | grep -v "tests/mocks" | head -1)"
+
+# Check if mocking is enabled
+if [[ "${MOCK_API_ENABLED:-false}" != "true" ]]; then
+  # Not in mock mode, use real wget
+  exec "$REAL_WGET" "$@"
+fi
+
+# Parse wget arguments
+declare -- output_file=""
+declare -- url=""
+declare -i i=0
+
+while ((i < $#)); do
+  i+=1
+  case "${!i}" in
+    -O)
+      i+=1
+      output_file="${!i}"
+      ;;
+    -q|--quiet)
+      # Ignore quiet flag
+      ;;
+    *)
+      # Assume it's the URL
+      url="${!i}"
+      ;;
+  esac
+done
+
+# Determine which fixture to return based on URL
+declare -- fixture_file=""
+
+if [[ "$url" =~ currencies\.json ]]; then
+  # Currency list endpoint
+  fixture_file="${TEST_FIXTURES}/api_responses/currencies.json"
+
+elif [[ "$url" =~ /latest\.json ]]; then
+  # Latest rates endpoint
+  fixture_file="${TEST_FIXTURES}/api_responses/latest.json"
+
+elif [[ "$url" =~ /historical/([0-9]{4}-[0-9]{2}-[0-9]{2})\.json ]]; then
+  # Historical endpoint
+  declare -- date="${BASH_REMATCH[1]}"
+  fixture_file="${TEST_FIXTURES}/api_responses/historical_${date}.json"
+
+  # If specific date not found, use generic historical
+  if [[ ! -f "$fixture_file" ]]; then
+    fixture_file="${TEST_FIXTURES}/api_responses/historical.json"
+  fi
+
+else
+  # Unknown endpoint, return error
+  echo "Mock wget: Unknown API endpoint: $url" >&2
+  exit 1
+fi
+
+# Check if fixture exists
+if [[ ! -f "$fixture_file" ]]; then
+  echo "Mock wget: Fixture not found: $fixture_file" >&2
+  exit 1
+fi
+
+# Return fixture data
+if [[ -n "$output_file" ]]; then
+  cp "$fixture_file" "$output_file"
+else
+  cat "$fixture_file"
+fi
+
+exit 0
+
+#fin

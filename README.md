@@ -172,7 +172,7 @@ sqlite3 xchg.db "SELECT name FROM sqlite_master WHERE type='table'"
 sqlite3 xchg.db -header -column \
   "SELECT * FROM IDR WHERE Currency='USD' ORDER BY Date DESC LIMIT 10"
 
-# Get latest rate for multiple currencies
+# Get latest rates for multiple currencies
 sqlite3 xchg.db \
   "SELECT Currency, Xchg, Date FROM IDR
    WHERE Currency IN ('USD','EUR','GBP')
@@ -186,6 +186,63 @@ sqlite3 xchg.db \
 - The UNIQUE constraint on (Date, Currency) prevents duplicate entries
 - Exchange rates are stored with 6 decimal places precision
 - Each base currency maintains its own complete table of exchange rates
+
+## Testing
+
+The project includes a comprehensive test suite using [BATS (Bash Automated Testing System)](https://github.com/bats-core/bats-core).
+
+### Quick Start
+
+```bash
+# Install BATS framework
+./scripts/install_bats.sh
+
+# Run all tests
+./scripts/run_tests.sh
+
+# Run specific test suites
+./scripts/run_tests.sh --unit       # Unit tests only (fast)
+./scripts/run_tests.sh --features   # Feature tests
+./scripts/run_tests.sh --integration  # Integration tests (requires API key)
+```
+
+### Test Organization
+
+- **Unit Tests** (`tests/unit/`) - Fast, isolated tests with mocked dependencies
+- **Integration Tests** (`tests/integration/`) - Real API calls and database operations
+- **Feature Tests** (`tests/features/`) - Organized by feature area
+- **E2E Tests** (`tests/e2e/`) - Complete user workflows
+
+### Test Coverage
+
+- **Target**: ~85% code coverage
+- **Mock API**: Offline testing using fixture data
+- **CI/CD**: Automated testing via GitHub Actions
+- **Documentation**: See [`tests/README.md`](tests/README.md) for detailed information
+
+### Writing Tests
+
+```bash
+#!/usr/bin/env bats
+
+load '../test_helper.bash'
+
+setup() {
+  setup_test_env
+}
+
+teardown() {
+  teardown_test_env
+}
+
+@test "currency alias: yuan normalizes to CNY" {
+  run_openxchg -q -l IDR yuan
+  assert_success
+  assert_output --partial "CNY"
+}
+```
+
+For more information on writing and running tests, see the [Test Suite Documentation](tests/README.md).
 
 ## Contributing
 
