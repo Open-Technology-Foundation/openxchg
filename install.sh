@@ -186,6 +186,32 @@ install_openxchg() {
 }
 
 #------------------------------------------------------------------------------
+# Setup database directory
+#------------------------------------------------------------------------------
+setup_database() {
+  info 'Setting up database directory...'
+
+  local -r db_dir=/var/lib/openxchg
+
+  # Create database directory
+  if [[ -d "$db_dir" ]]; then
+    success "Database directory already exists: $db_dir"
+  elif [[ -w /var/lib ]]; then
+    mkdir -p "$db_dir"
+    success "Database directory created: $db_dir"
+  elif command_exists sudo; then
+    sudo mkdir -p "$db_dir"
+    sudo chown "$USER":"$USER" "$db_dir"
+    success "Database directory created: $db_dir"
+  else
+    warn "Cannot create $db_dir. Database will be created in user directory."
+    return 1
+  fi
+
+  return 0
+}
+
+#------------------------------------------------------------------------------
 # Setup configuration
 #------------------------------------------------------------------------------
 setup_config() {
@@ -215,7 +241,7 @@ setup_config() {
 # openxchg configuration file
 # See: openxchg --help for details
 
-[general]
+[General]
 # Default base currency (default: IDR)
 DEFAULT_BASE_CURRENCY=IDR
 
@@ -225,7 +251,13 @@ DEFAULT_VERBOSE=1
 # Default date for queries (yesterday, today, or YYYY-MM-DD)
 DEFAULT_DATE=yesterday
 
-[api]
+# Auto-update currency list from API (true/false)
+AUTO_UPDATE_CURRENCY_LIST=true
+
+# Which currencies to update (ALL, CONFIGURED, or path to file)
+UPDATE_CURRENCIES=ALL
+
+[API]
 # OpenExchangeRates.org API key
 # WARNING: Storing API key in config file is less secure than using
 # environment variable OPENEXCHANGE_API_KEY
@@ -238,16 +270,16 @@ EOF
 
   cat >> "$config_file" <<'EOF'
 
-[update]
-# Auto-update currency list from API (true/false)
-AUTO_UPDATE_CURRENCY_LIST=true
+[Database]
+# Database file location
+# Must be an absolute path (relative paths are not allowed)
+# Default: /var/lib/openxchg/xchg.db
+DB_PATH=/var/lib/openxchg/xchg.db
 
-# Which currencies to update (ALL, CONFIGURED, or path to file)
-UPDATE_CURRENCIES=ALL
-
-[database]
-# Custom database path (optional)
-# DB_PATH=/custom/path/to/xchg.db
+# Usage examples:
+#   DB_PATH=/var/lib/openxchg/xchg.db           # System-wide location
+#   DB_PATH=~/.local/share/openxchg/xchg.db     # User-specific location
+#   DB_PATH=/ai/scripts/openxchg/xchg.db        # Script directory location
 EOF
 
   chmod 600 "$config_file"
@@ -313,6 +345,9 @@ main() {
 
   # Install openxchg
   install_openxchg
+
+  # Setup database directory
+  setup_database
 
   # Setup configuration
   setup_config

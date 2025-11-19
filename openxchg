@@ -1409,6 +1409,13 @@ main() {
   [[ -z "${CONFIG_DB_PATH}" ]] || DB_PATH="${CONFIG_DB_PATH}"
   [[ -n "${CONFIG_AUTO_UPDATE_CURRENCY_LIST}" ]] || CONFIG_AUTO_UPDATE_CURRENCY_LIST="true"
 
+  # Validate DB_PATH is absolute (reject relative paths)
+  if [[ ! "$DB_PATH" =~ ^/ && ! "$DB_PATH" =~ ^\~ ]]; then
+    error "Database path must be absolute, got: $DB_PATH"
+    error "Update your config file to use an absolute path (e.g., /var/lib/openxchg/xchg.db)"
+    exit 1
+  fi
+
   # Load currency list (from JSON if available, otherwise hardcoded)
   load_currencies
 
@@ -1703,14 +1710,14 @@ anywhere in the command line.
 Usage: openxchg [OPTIONS] [base_currency] [CurrencyCode]...
 
 Options:
-  -h, --help          Display this help message and exit
-  --version           Display version information and exit
-  -v, --verbose       Enable verbose output (default)
-  -q, --quiet         Disable verbose output
   -d, --date DATE     Specify date for query/update (default: yesterday UTC)
   -a, --apikey KEY    Use custom API key (overrides OPENEXCHANGE_API_KEY env)
   -l, --latest        Fetch and display current real-time rates (display-only)
   -A, --all           Update all currencies (overrides UPDATE_CURRENCIES config)
+
+  -U, --update-currencies
+                      Fetch and update currency list from API
+
   -C, --config FILE   Use alternative config file (default: ~/.config/openxchg/config)
   --init-config       Create default config file (backs up existing)
   --show-config       Display current effective configuration
@@ -1718,7 +1725,11 @@ Options:
   --db-info           Display database statistics and information
   --db-vacuum         Optimize and compact database (reclaim space)
   --db-check          Verify database integrity and schema
-  -U, --update-currencies  Fetch and update currency list from API
+
+  -v, --verbose       Enable verbose output (default)
+  -q, --quiet         Disable verbose output
+  -V, --version       Display version information and exit
+  -h, --help          Display this help message and exit
 
 Arguments:
   base_currency       Base currency (default: IDR, case-insensitive)
