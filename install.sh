@@ -1,6 +1,4 @@
 #!/bin/bash
-set -euo pipefail
-
 #==============================================================================
 # install.sh - openxchg installation script
 #
@@ -12,71 +10,52 @@ set -euo pipefail
 # Author: Gary Dean, Biksu Okusi
 # License: GNU GPL v3.0
 #==============================================================================
-
-# Color codes for output
-declare -r RED='\033[0;31m'
-declare -r GREEN='\033[0;32m'
-declare -r YELLOW='\033[1;33m'
-declare -r BLUE='\033[0;34m'
-declare -r NC='\033[0m' # No Color
+set -euo pipefail
+shopt -s inherit_errexit extglob nullglob
 
 # Installation configuration
-declare -r INSTALL_DIR="/usr/local/bin"
-declare -r CONFIG_DIR="${HOME}/.config/openxchg"
-declare -r REPO_URL="https://raw.githubusercontent.com/Open-Technology-Foundation/openxchg/main"
-declare -r VERSION="1.0.0"
+declare -r INSTALL_DIR=/usr/local/bin
+declare -r CONFIG_DIR="$HOME"/.config/openxchg
+declare -r REPO_URL='https://raw.githubusercontent.com/Open-Technology-Foundation/openxchg/main'
+declare -r VERSION='1.0.0'
 
-#------------------------------------------------------------------------------
-# Print colored message
-#------------------------------------------------------------------------------
-print_message() {
-  local -r color="$1"
-  local -r message="$2"
-  echo -e "${color}${message}${NC}"
+declare -r SCRIPT_NAME=openxchg
+# Color definitions
+if [[ -t 1 && -t 2 ]]; then
+  declare -r RED=$'\033[0;31m' GREEN=$'\033[0;32m' YELLOW=$'\033[0;33m' CYAN=$'\033[0;36m' NC=$'\033[0m'
+else
+  declare -r RED='' GREEN='' YELLOW='' CYAN='' NC=''
+fi
+# Utility functions
+_log() {
+  local -- prefix="$SCRIPT_NAME:" msg
+  case "${FUNCNAME[1]}" in
+    print)   : ;;
+    info)    prefix+=" ${CYAN}◉${NC}" ;;
+    warn)    prefix+=" ${YELLOW}▲${NC}" ;;
+    success) prefix+=" ${GREEN}✓${NC}" ;;
+    error)   prefix+=" ${RED}✗${NC}" ;;
+  esac
+  for msg in "$@"; do printf '%s %s\n' "$prefix" "$msg"; done
 }
+print() { _log "$@"; }
+info() { >&2 _log "$@"; }
+warn() { >&2 _log "$@"; }
+success() { _log "$@"; }
+error() { >&2 _log "$@"; }
+die() { (($# > 1)) && error "${@:2}"; exit "${1:-0}"; }
 
-#------------------------------------------------------------------------------
-# Print info message
-#------------------------------------------------------------------------------
-info() {
-  print_message "${BLUE}" "◉ $1"
-}
-
-#------------------------------------------------------------------------------
-# Print success message
-#------------------------------------------------------------------------------
-success() {
-  print_message "${GREEN}" "✓ $1"
-}
-
-#------------------------------------------------------------------------------
-# Print warning message
-#------------------------------------------------------------------------------
-warning() {
-  print_message "${YELLOW}" "▲ $1"
-}
-
-#------------------------------------------------------------------------------
-# Print error message and exit
-#------------------------------------------------------------------------------
-error() {
-  print_message "${RED}" "✗ $1" >&2
-  exit 1
-}
 
 #------------------------------------------------------------------------------
 # Check if command exists
 #------------------------------------------------------------------------------
-command_exists() {
-  command -v "$1" >/dev/null 2>&1
-}
+command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 #------------------------------------------------------------------------------
 # Get version of command
 #------------------------------------------------------------------------------
 get_version() {
-  local -r cmd="$1"
-  case "$cmd" in
+  case $1 in
     bash)
       bash --version | head -n1 | grep -oP '\d+\.\d+\.\d+' | head -n1
       ;;
@@ -84,7 +63,7 @@ get_version() {
       sqlite3 --version | grep -oP '^\d+\.\d+\.\d+' | head -n1
       ;;
     *)
-      echo "0.0.0"
+      echo '0.0.0'
       ;;
   esac
 }
@@ -93,8 +72,7 @@ get_version() {
 # Compare versions (returns 0 if $1 >= $2)
 #------------------------------------------------------------------------------
 version_gte() {
-  local -r version1="$1"
-  local -r version2="$2"
+  local -r version1=$1 version2=$2
   printf '%s\n%s\n' "$version2" "$version1" | sort -V -C 2>/dev/null
 }
 
@@ -102,36 +80,36 @@ version_gte() {
 # Check system requirements
 #------------------------------------------------------------------------------
 check_requirements() {
-  info "Checking system requirements..."
+  info 'Checking system requirements...'
 
   local -i missing=0
 
   # Check Bash version
   if command_exists bash; then
     local -r bash_version="$(get_version bash)"
-    if version_gte "$bash_version" "5.2.0"; then
+    if version_gte "$bash_version" '5.2.0'; then
       success "Bash $bash_version (required: 5.2+)"
     else
-      warning "Bash $bash_version found (required: 5.2+)"
-      ((missing+=1))
+      warn "Bash $bash_version found (required: 5.2+)"
+      missing+=1
     fi
   else
-    warning "Bash not found (required: 5.2+)"
-    ((missing+=1))
+    warn 'Bash not found (required: 5.2+)'
+    missing+=1
   fi
 
   # Check sqlite3 version
   if command_exists sqlite3; then
     local -r sqlite_version="$(get_version sqlite3)"
-    if version_gte "$sqlite_version" "3.45.0"; then
+    if version_gte "$sqlite_version" '3.45.0'; then
       success "sqlite3 $sqlite_version (required: 3.45+)"
     else
-      warning "sqlite3 $sqlite_version found (required: 3.45+)"
-      ((missing+=1))
+      warn "sqlite3 $sqlite_version found (required: 3.45+)"
+      missing+=1
     fi
   else
-    warning "sqlite3 not found (required: 3.45+)"
-    ((missing+=1))
+    warn 'sqlite3 not found (required: 3.45+)'
+    missing+=1
   fi
 
   # Check other dependencies
@@ -141,8 +119,8 @@ check_requirements() {
     if command_exists "$dep"; then
       success "$dep found"
     else
-      warning "$dep not found (required)"
-      ((missing+=1))
+      warn "$dep not found (required)"
+      missing+=1
     fi
   done
 
@@ -153,88 +131,84 @@ check_requirements() {
 # Install dependencies (Ubuntu/Debian)
 #------------------------------------------------------------------------------
 install_dependencies() {
-  if ! command_exists apt-get; then
-    warning "apt-get not found. Cannot auto-install dependencies."
-    warning "Please install manually: bash sqlite3 wget jq bc"
-    return 1
-  fi
+  command_exists apt-get ||  die 1 'apt-get not found. Cannot auto-install dependencies.' \
+                                   'Please install manually: bash sqlite3 wget jq bc'
 
-  info "Installing missing dependencies..."
+  info 'Installing missing dependencies...'
 
-  if [[ $EUID -ne 0 ]]; then
+  if ((EUID)); then
     if command_exists sudo; then
       sudo apt-get update -qq
       sudo apt-get install -y bash sqlite3 wget jq bc
     else
-      error "sudo not available. Please run as root or install dependencies manually."
+      die 1 'sudo not available. Please run as root or install dependencies manually.'
     fi
   else
     apt-get update -qq
     apt-get install -y bash sqlite3 wget jq bc
   fi
 
-  success "Dependencies installed"
+  success 'Dependencies installed'
 }
 
 #------------------------------------------------------------------------------
 # Download and install openxchg
 #------------------------------------------------------------------------------
 install_openxchg() {
-  info "Installing openxchg to ${INSTALL_DIR}..."
+  info "Installing openxchg to ${INSTALL_DIR@Q}"
 
   local -r temp_file="/tmp/openxchg.$$"
 
   # Download script
   if command_exists wget; then
-    wget -q -O "$temp_file" "${REPO_URL}/openxchg" || error "Failed to download openxchg"
+    wget -q -O "$temp_file" "$REPO_URL"/openxchg || die $? 'Failed to download openxchg'
   elif command_exists curl; then
-    curl -sSL -o "$temp_file" "${REPO_URL}/openxchg" || error "Failed to download openxchg"
+    curl -sSL -o "$temp_file" "$REPO_URL"/openxchg || die $? 'Failed to download openxchg'
   else
-    error "Neither wget nor curl available for download"
+    die 1 'Neither wget nor curl available for download'
   fi
 
   # Verify download
-  [[ -s "$temp_file" ]] || error "Downloaded file is empty"
+  [[ -s "$temp_file" ]] || die 1 'Downloaded file is empty'
 
   # Install to bin directory
   if [[ -w "$INSTALL_DIR" ]]; then
-    mv "$temp_file" "${INSTALL_DIR}/openxchg"
-    chmod +x "${INSTALL_DIR}/openxchg"
+    mv "$temp_file" "$INSTALL_DIR"/openxchg
+    chmod +x "$INSTALL_DIR"/openxchg
   elif command_exists sudo; then
-    sudo mv "$temp_file" "${INSTALL_DIR}/openxchg"
-    sudo chmod +x "${INSTALL_DIR}/openxchg"
+    sudo mv "$temp_file" "$INSTALL_DIR"/openxchg
+    sudo chmod +x "$INSTALL_DIR"/openxchg
   else
-    error "Cannot write to ${INSTALL_DIR}. Please run with sudo or choose different location."
+    die 1 "Cannot write to ${INSTALL_DIR@Q}. Please run with sudo or choose different location."
   fi
 
-  success "openxchg installed to ${INSTALL_DIR}/openxchg"
+  success "openxchg installed to $INSTALL_DIR/openxchg"
 }
 
 #------------------------------------------------------------------------------
 # Setup configuration
 #------------------------------------------------------------------------------
 setup_config() {
-  info "Setting up configuration..."
+  info 'Setting up configuration...'
 
   # Create config directory
   [[ -d "$CONFIG_DIR" ]] || mkdir -p "$CONFIG_DIR"
 
-  local -r config_file="${CONFIG_DIR}/config"
+  local -r config_file="$CONFIG_DIR"/config
 
   # Check if config already exists
   if [[ -f "$config_file" ]]; then
-    warning "Configuration file already exists: $config_file"
-    read -rp "Overwrite? (y/N): " response
+    warn "Configuration file already exists ${config_file@Q}"
+    read -rp 'Overwrite? (y/N): ' response
     [[ "$response" =~ ^[Yy]$ ]] || return 0
   fi
 
   # Prompt for API key
   echo
-  info "OpenExchangeRates.org API Key Setup"
-  echo "  Get your free API key at: https://openexchangerates.org/signup/free"
-  echo "  (Free tier: 1,000 requests/month with historical data)"
-  echo
-  read -rp "Enter your API key (or press Enter to skip): " api_key
+  info 'OpenExchangeRates.org API Key Setup'
+  print '  Get your free API key at: https://openexchangerates.org/signup/free' \
+        '  (Free tier: 1,000 requests/month with historical data)' ''
+  read -rp 'Enter your API key (or press Enter to skip): ' api_key
 
   # Create config file
   cat > "$config_file" <<'EOF'
@@ -256,7 +230,6 @@ DEFAULT_DATE=yesterday
 # WARNING: Storing API key in config file is less secure than using
 # environment variable OPENEXCHANGE_API_KEY
 EOF
-
   if [[ -n "$api_key" ]]; then
     echo "API_KEY=${api_key}" >> "$config_file"
   else
@@ -278,14 +251,14 @@ UPDATE_CURRENCIES=ALL
 EOF
 
   chmod 600 "$config_file"
-  success "Configuration created: $config_file"
+  success "Configuration created ${config_file@Q}"
 
   # Create environment variable suggestion
   if [[ -z "$api_key" ]]; then
     echo
-    warning "No API key configured. To set it later, either:"
-    echo "  1. Edit ${config_file}"
-    echo "  2. Or set environment variable: export OPENEXCHANGE_API_KEY='your_key'"
+    warn 'No API key configured. To set it later, either:'
+    print "  1. Edit ${config_file@Q}" \
+          "  2. Or set environment variable: export OPENEXCHANGE_API_KEY='your_key'"
   fi
 }
 
@@ -293,30 +266,28 @@ EOF
 # Test installation
 #------------------------------------------------------------------------------
 test_installation() {
-  info "Testing installation..."
+  info 'Testing installation...'
 
-  if ! command_exists openxchg; then
-    error "openxchg command not found. Installation may have failed."
-  fi
+  command_exists openxchg || die 1 'openxchg command not found. Installation may have failed.'
 
   # Test help output
   if openxchg --version &>/dev/null; then
-    success "openxchg is working correctly"
+    success 'openxchg is working correctly'
   else
-    warning "openxchg installed but may not be fully functional"
+    warn 'openxchg installed but may not be fully functional'
   fi
 
   # Check for API key
   if [[ -f "${CONFIG_DIR}/config" ]] && grep -q "^API_KEY=" "${CONFIG_DIR}/config"; then
     echo
-    info "You can now use openxchg!"
-    echo "  Try: openxchg --help"
-    echo "  Or:  openxchg idr usd eur gbp"
+    info 'You can now use openxchg'
+    print '  Try: openxchg --help' \
+          '  Or:  openxchg idr usd eur gbp'
   else
     echo
-    warning "API key not configured. Set it to use openxchg:"
-    echo "  export OPENEXCHANGE_API_KEY='your_api_key_here'"
-    echo "  Or edit: ${CONFIG_DIR}/config"
+    warn 'API key not configured. Set it to use openxchg:'
+    print "  export OPENEXCHANGE_API_KEY='your_api_key_here'" \
+          "  Or edit: ${CONFIG_DIR}/config"
   fi
 }
 
@@ -324,49 +295,33 @@ test_installation() {
 # Main installation process
 #------------------------------------------------------------------------------
 main() {
-  echo
-  print_message "${BLUE}" "═══════════════════════════════════════════════════"
-  print_message "${BLUE}" "  openxchg Installer v${VERSION}"
-  print_message "${BLUE}" "  Multi-currency Exchange Rate Database Manager"
-  print_message "${BLUE}" "═══════════════════════════════════════════════════"
-  echo
+  print '═══════════════════════════════════════════════════' \
+        "  openxchg Installer ${VERSION}" \
+        '  Multi-currency Exchange Rate Database Manager' \
+        '═══════════════════════════════════════════════════' ''
 
   # Check requirements
   if ! check_requirements; then
     echo
-    read -rp "Install missing dependencies? (y/N): " response
+    read -rp 'Install missing dependencies? (y/N): ' response
     if [[ "$response" =~ ^[Yy]$ ]]; then
       install_dependencies
     else
-      error "Missing required dependencies. Please install them manually."
+      die 1 'Missing required dependencies. Please install them manually.'
     fi
   fi
-
-  echo
 
   # Install openxchg
   install_openxchg
 
-  echo
-
   # Setup configuration
   setup_config
-
-  echo
 
   # Test installation
   test_installation
 
-  echo
-  success "Installation complete!"
-  echo
-  print_message "${GREEN}" "═══════════════════════════════════════════════════"
-  echo
+  success 'Installation complete'
 }
 
-# Run main if script is executed (not sourced)
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  main "$@"
-fi
-
+main "$@"
 #fin
