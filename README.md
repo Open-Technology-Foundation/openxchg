@@ -231,7 +231,7 @@ openxchg [OPTIONS] [base_currency] [CurrencyCode]...
 | Option | Description |
 |--------|-------------|
 | `-h, --help` | Display comprehensive help message |
-| `--version` | Display version information (1.0.0) |
+| `-V, --version` | Display version information (1.0.0) |
 | `-v, --verbose` | Enable verbose output (default) |
 | `-q, --quiet` | Disable verbose output |
 | `-d, --date DATE` | Specify date for query/update (default: yesterday) |
