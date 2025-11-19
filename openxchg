@@ -47,7 +47,6 @@ declare -i UPDATE_ALL_CURRENCIES=0
 
 trap '{ cleanup $?; }' EXIT
 
-
 # Color definitions
 if [[ -t 1 && -t 2 ]]; then
   declare -r RED=$'\033[0;31m' GREEN=$'\033[0;32m' YELLOW=$'\033[0;33m' NC=$'\033[0m'
@@ -622,7 +621,6 @@ validate_config() {
   else
     success "All dependencies available"
   fi
-  echo
 
   # SUMMARY
   info "Summary" "-------" \
@@ -1423,7 +1421,7 @@ main() {
         usage
         exit 0
         ;;
-      --version)
+      -V|--version)
         echo "$SCRIPT_NAME $VERSION"
         exit 0
         ;;
@@ -1493,9 +1491,12 @@ main() {
         done
         break
         ;;
+
+      -[hVUCvqdalA]*) #shellcheck disable=SC2046
+        set -- '' $(printf -- "-%c " $(grep -o . <<<"${1:1}")) "${@:2}" ;;
       -*)
-        die 1 "Unknown option ${1@Q}"
-        ;;
+        die 22 "Invalid option ${1@Q}" ;;
+
       *)
         # Collect non-option argument and continue parsing
         positional_args+=("$1")
@@ -1557,10 +1558,10 @@ main() {
     info "Latest Exchange Rates (Real-time)" \
          "Base Currency: $base_currency" \
          "Updated: $updated_time"
-    echo
-    printf "%-10s  %-14s\n" "Currency" "Xchg"
-    printf "%-10s  %-14s\n" "----------" "--------------"
-
+    if ((VERBOSE)); then
+      printf "%-10s  %-14s\n" "Currency" "Xchg"
+      printf "%-10s  %-14s\n" "----------" "--------------"
+    fi
     # Display rates (all currencies if none specified, or just requested ones)
     if [[ -n "${1:-}" ]]; then
       # Specific currencies requested
@@ -1598,9 +1599,10 @@ main() {
   # QUERY MODE: Display rates for specified currencies
   if [[ -n "${1:-}" ]]; then
     # Print header once for all queries
-    printf "%-10s  %-14s  %s\n" "Currency" "Xchg" "Date (UTC)"
-    printf "%-10s  %-14s  %s\n" "----------" "--------------" "-----------"
-
+    if ((VERBOSE)); then
+      printf "%-10s  %-14s  %s\n" "Currency" "Xchg" "Date (UTC)"
+      printf "%-10s  %-14s  %s\n" "----------" "--------------" "-----------"
+    fi
     while (($#)); do
       mu=$(normalize_currency_code "$1")
       # Query SQLite and format output (avoid scientific notation with rtrim)
@@ -1646,7 +1648,6 @@ main() {
   eval "$(jq -r '.rates | to_entries[] | "\(.key)=\(.value)"' "$TMPFILE")"
 
   date="$dte"
-  echo
 
   # Get base currency rate from API response
   #shellcheck disable=SC2154
