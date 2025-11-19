@@ -183,8 +183,8 @@ run_tests() {
   echo "Test paths: ${test_paths[*]}"
   echo ""
 
-  # Run BATS
-  if bats "${bats_args[@]}"; then
+  # Run BATS with recursive flag to find all .bats files
+  if bats --recursive "${bats_args[@]}"; then
     echo ""
     echo "✓ All tests passed!"
     return 0

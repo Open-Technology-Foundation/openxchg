@@ -131,7 +131,7 @@ AUTO_UPDATE_CURRENCY_LIST=invalid
   run_openxchg --show-config 2>&1
 
   assert_success
-  assert_output --partial "Warning"
+  assert_output --partial "Invalid"
 }
 
 @test "load_config: fallback mode doesn't override existing values" {

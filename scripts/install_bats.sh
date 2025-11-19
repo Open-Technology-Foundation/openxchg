@@ -10,7 +10,6 @@
 # If install_dir is not provided, installs to /usr/local
 
 set -euo pipefail
-set -o inherit_errexit
 
 declare -r SCRIPT_NAME="${0##*/}"
 declare -r INSTALL_DIR="${1:-/usr/local}"

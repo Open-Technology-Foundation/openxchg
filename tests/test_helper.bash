@@ -15,10 +15,11 @@ load '/usr/local/lib/bats-file/load.bash' 2>/dev/null || true
 
 # Test configuration
 export BATS_TEST_DIRNAME="${BATS_TEST_DIRNAME:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-export OPENXCHG_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
+# Find repository root by looking for the openxchg script
+export OPENXCHG_ROOT="$(cd "${BATS_TEST_DIRNAME}" && while [[ ! -f "openxchg" ]] && [[ "$PWD" != "/" ]]; do cd ..; done && pwd)"
 export OPENXCHG_BIN="${OPENXCHG_ROOT}/openxchg"
-export TEST_FIXTURES="${BATS_TEST_DIRNAME}/fixtures"
-export TEST_MOCKS="${BATS_TEST_DIRNAME}/mocks"
+export TEST_FIXTURES="${OPENXCHG_ROOT}/tests/fixtures"
+export TEST_MOCKS="${OPENXCHG_ROOT}/tests/mocks"
 
 # Test environment variables
 export TEST_TEMP_DIR=""

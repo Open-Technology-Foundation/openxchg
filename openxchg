@@ -23,13 +23,13 @@ declare -r SYSTEM_CONFIG_FILE="/etc/openxchg/config"
 declare -- CONFIG_FILE="${HOME}/.config/openxchg/config"
 declare -- CONFIG_DIR="${HOME}/.config/openxchg"
 declare -- CURRENCIES_FILE="${CONFIG_DIR}/currencies.json"
-declare -- CONFIG_DEFAULT_BASE_CURRENCY=""
-declare -- CONFIG_DEFAULT_VERBOSE=""
-declare -- CONFIG_DEFAULT_DATE=""
-declare -- CONFIG_API_KEY=""
-declare -- CONFIG_DB_PATH=""
-declare -- CONFIG_AUTO_UPDATE_CURRENCY_LIST=""
-declare -- CONFIG_UPDATE_CURRENCIES=""
+declare -- CONFIG_DEFAULT_BASE_CURRENCY=''
+declare -- CONFIG_DEFAULT_VERBOSE=''
+declare -- CONFIG_DEFAULT_DATE=''
+declare -- CONFIG_API_KEY=''
+declare -- CONFIG_DB_PATH=''
+declare -- CONFIG_AUTO_UPDATE_CURRENCY_LIST=''
+declare -- CONFIG_UPDATE_CURRENCIES=''
 
 declare -- DB_PATH="$SCRIPT_DIR"/xchg.db
 
@@ -50,9 +50,9 @@ trap '{ cleanup $?; }' EXIT
 
 # Color definitions
 if [[ -t 1 && -t 2 ]]; then
-  declare -r RED=$'\033[0;31m' GREEN=$'\033[0;32m' YELLOW=$'\033[0;33m' CYAN=$'\033[0;36m' BOLD='\033[1m' NC=$'\033[0m'
+  declare -r RED=$'\033[0;31m' GREEN=$'\033[0;32m' YELLOW=$'\033[0;33m' NC=$'\033[0m'
 else
-  declare -r RED='' GREEN='' YELLOW='' CYAN='' BOLD='' NC=''
+  declare -r RED='' GREEN='' YELLOW='' NC=''
 fi
 
 # Utility functions
@@ -92,9 +92,9 @@ die() { (($# > 1)) && error "${@:2}"; exit "${1:-0}"; }
 #   CONFIG_DB_PATH
 #
 load_config() {
-  local -- config_file="$1"
+  local -- config_file=$1
   local -- mode="${2:-normal}"
-  local -- section="" key value line
+  local -- section='' key value line
 
   [[ -f "$config_file" ]] || return 0
   [[ -r "$config_file" ]] || return 0  # Silently skip if not readable
@@ -197,7 +197,7 @@ load_config() {
 #   $1 - Path to config file to create
 #
 create_default_config() {
-  local -- config_file="$1"
+  local -- config_file=$1
   local -- config_dir="${config_file%/*}"
 
   # Create config directory if it doesn't exist
@@ -351,7 +351,7 @@ EOF
 validate_config() {
   local -- config_file="${1:-$CONFIG_FILE}"
   local -i errors=0 warnings=0 info=0
-  local -- section="" line key value
+  local -- section='' line key value
   local -i line_num=0
 
   info "Validating Configuration: $config_file" "========================================" ''
@@ -406,7 +406,7 @@ validate_config() {
       # Validate key format
       if [[ ! "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
         warn "Line $line_num: Key should be UPPERCASE_WITH_UNDERSCORES: $key"
-        ((warnings+=1))
+        warnings+=1
       fi
 
       continue
@@ -414,12 +414,12 @@ validate_config() {
 
     # Line doesn't match any valid format
     error "Line $line_num: Invalid syntax: ${line:0:60}"
-    ((errors+=1))
+    errors+=1
   done < "$config_file"
 
   if ((errors == 0 && warnings == 0)); then
     success "Syntax validation passed"
-  elif ((errors > 0)); then
+  elif ((errors)); then
     error "Syntax validation failed: $errors error(s), $warnings warning(s)"
   else
     success "Syntax validation passed with $warnings warning(s)"
@@ -428,7 +428,7 @@ validate_config() {
   # 2. VALUE VALIDATION
   info "2. Value Validation" "-------------------"
 
-  section=""
+  section=''
   while IFS= read -r line || [[ -n "$line" ]]; do
     # Skip empty lines and comments
     [[ "$line" =~ ^[[:space:]]*$ ]] && continue
@@ -451,23 +451,23 @@ validate_config() {
             value="${value^^}"
             if [[ ! "$value" =~ ^[A-Z]{3}$ ]]; then
               error "DEFAULT_BASE_CURRENCY must be 3-letter code: $value"
-              ((errors+=1))
+              errors+=1
             elif [[ ! " ${MU[*]} " =~ " $value " ]]; then
               error "DEFAULT_BASE_CURRENCY not supported: $value"
-              ((errors+=1))
+              errors+=1
             else
               success "DEFAULT_BASE_CURRENCY: $value (valid)"
-              ((info+=1))
+              info+=1
             fi
           fi
           ;;
         General:DEFAULT_VERBOSE)
           if [[ -n "$value" ]] && [[ ! "$value" =~ ^[01]$ ]]; then
             error "DEFAULT_VERBOSE must be 0 or 1: $value"
-            ((errors+=1))
+            errors+=1
           elif [[ -n "$value" ]]; then
             success "DEFAULT_VERBOSE: $value (valid)"
-            ((info+=1))
+            info+=1
           fi
           ;;
         General:DEFAULT_DATE)
@@ -475,16 +475,16 @@ validate_config() {
             case "$value" in
               yesterday|today)
                 success "DEFAULT_DATE: $value (valid)"
-                ((info+=1))
+                info+=1
                 ;;
               *)
                 # Try to parse as date
                 if TZ=UTC date +%F -d "$value" &>/dev/null; then
                   success "DEFAULT_DATE: $value (valid date format)"
-                  ((info+=1))
+                  info+=1
                 else
                   error "DEFAULT_DATE invalid: $value (use 'yesterday', 'today', or YYYY-MM-DD)"
-                  ((errors+=1))
+                  errors+=1
                 fi
                 ;;
             esac
@@ -495,10 +495,10 @@ validate_config() {
             value="${value,,}"
             if [[ ! "$value" =~ ^(true|false)$ ]]; then
               error "AUTO_UPDATE_CURRENCY_LIST must be 'true' or 'false': $value"
-              ((errors+=1))
+              errors+=1
             else
               success "AUTO_UPDATE_CURRENCY_LIST: $value (valid)"
-              ((info+=1))
+              info+=1
             fi
           fi
           ;;
@@ -507,20 +507,20 @@ validate_config() {
             case "$value" in
               ALL|CONFIGURED)
                 success "UPDATE_CURRENCIES: $value (valid)"
-                ((info+=1))
+                info+=1
                 ;;
               /*)
                 if [[ ! -f "$value" ]]; then
                   warn "UPDATE_CURRENCIES file not found: $value"
-                  ((warnings+=1))
+                  warnings+=1
                 else
                   success "UPDATE_CURRENCIES: $value (file exists)"
-                  ((info+=1))
+                  info+=1
                 fi
                 ;;
               *)
                 error "UPDATE_CURRENCIES must be 'ALL', 'CONFIGURED', or absolute path: $value"
-                ((errors+=1))
+                errors+=1
                 ;;
             esac
           fi
@@ -534,15 +534,15 @@ validate_config() {
               parent_dir=$(dirname "$value")
               if [[ ! -d "$parent_dir" ]]; then
                 warn "DB_PATH parent directory does not exist: $parent_dir"
-                ((warnings+=1))
+                warnings+=1
               else
                 success "DB_PATH: $value (parent directory exists)"
-                ((info+=1))
+                info+=1
               fi
             else
               # Relative path is ok (relative to script directory)
               success "DB_PATH: $value (relative path)"
-              ((info+=1))
+              info+=1
             fi
           fi
           ;;
@@ -550,17 +550,17 @@ validate_config() {
           # Don't validate the actual key value, just check if set
           if [[ -n "$value" ]]; then
             info "API_KEY: Set in config (****${value: -4})"
-            ((info+=1))
+            info+=1
           fi
           ;;
       esac
     fi
   done < "$config_file"
 
-  if ((errors == 0)); then
-    success "Value validation passed"
-  else
+  if ((errors)); then
     error "Value validation failed: $errors error(s)"
+  else
+    success "Value validation passed"
   fi
 
   # 3. BEST PRACTICES
@@ -574,29 +574,29 @@ validate_config() {
     if grep -q '^[[:space:]]*API_KEY=.' "$config_file"; then
       warn "Config contains API_KEY but is not mode 600/400 (current: $perms)"
       info "  Recommendation: chmod 600 $config_file"
-      ((warnings+=1))
+      warnings+=1
     else
       info "File permissions: $perms (acceptable, no API key in file)"
-      ((info+=1))
+      info+=1
     fi
   else
     success "File permissions: $perms (secure)"
-    ((info+=1))
+    info+=1
   fi
 
   # Check if API key is in environment instead of file
   if grep -q '^[[:space:]]*API_KEY=[[:space:]]*$' "$config_file"; then
     success "API_KEY not stored in config file (using environment variable recommended)"
-    ((info+=1))
+    info+=1
   elif grep -q '^[[:space:]]*API_KEY=.' "$config_file"; then
     info "API_KEY stored in config file (environment variable is more secure)"
-    ((info+=1))
+    info+=1
   fi
 
   # Check UPDATE_CURRENCIES setting for performance
   if grep -q '^[[:space:]]*UPDATE_CURRENCIES=ALL' "$config_file"; then
     info "UPDATE_CURRENCIES=ALL will update all 173 currencies (consider selective list for faster updates)"
-    ((info+=1))
+    info+=1
   fi
 
   success "Best practices check completed"
@@ -612,15 +612,15 @@ validate_config() {
       success "$cmd: Available"
     else
       error "Required command not found: $cmd"
-      ((errors+=1))
-      ((missing+=1))
+      errors+=1
+      missing+=1
     fi
   done
 
-  if ((missing == 0)); then
-    success "All dependencies available"
-  else
+  if ((missing)); then
     error "Dependency check failed: $missing missing command(s)"
+  else
+    success "All dependencies available"
   fi
   echo
 
@@ -630,10 +630,10 @@ validate_config() {
        "Warnings: $warnings" \
        "Info:     $info"
 
-  if ((errors > 0)); then
+  if ((errors)); then
     error "VALIDATION FAILED"
     return 1
-  elif ((warnings > 0)); then
+  elif ((warnings)); then
     success "VALIDATION PASSED (with warnings)"
     return 0
   else
@@ -650,6 +650,10 @@ validate_config() {
 #
 show_config() {
   local -- base_source verbose_source date_source dbpath_source autoupdate_source updatecurr_source
+  local -i saved_verbose=$VERBOSE
+
+  # Temporarily enable verbose for show_config regardless of user setting
+  VERBOSE=1
 
   info "Current Configuration (effective values)" "========================================" ''
 
@@ -704,6 +708,9 @@ show_config() {
   fi
 
   info "Precedence: CLI options > User config > Environment > System config > Defaults"
+
+  # Restore previous verbose setting
+  VERBOSE=$saved_verbose
 }
 
 #
@@ -716,7 +723,7 @@ show_config() {
 #   $1 - Path to config file
 #
 check_config_security() {
-  local -- config_file="$1"
+  local -- config_file=$1
 
   [[ -f "$config_file" ]] || return 0
   [[ -n "${CONFIG_API_KEY}" ]] || return 0
@@ -892,7 +899,7 @@ load_currencies() {
 #   Currency name from currencies.json, or empty string if not found
 #
 get_currency_name() {
-  local -- code="$1"
+  local -- code=$1
 
   [[ -f "$CURRENCIES_FILE" ]] || return 0
   jq -r --arg code "$code" '.currencies[$code] // ""' "$CURRENCIES_FILE" 2>/dev/null || echo ''
@@ -911,7 +918,7 @@ get_currency_name() {
 #   Space-separated list of uppercase currency codes via stdout
 #
 load_update_currency_list() {
-  local -- list_file="$1"
+  local -- list_file=$1
   local -- line code
   local -a codes=()
 
@@ -1130,7 +1137,7 @@ db_info() {
     # Get record count
     records=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM $table" 2>/dev/null || echo 0)
 
-    if ((records > 0)); then
+    if ((records)); then
       # Get date range
       min_date=$(sqlite3 "$DB_PATH" "SELECT MIN(Date) FROM $table" 2>/dev/null || echo "N/A")
       max_date=$(sqlite3 "$DB_PATH" "SELECT MAX(Date) FROM $table" 2>/dev/null || echo "N/A")
@@ -1147,7 +1154,7 @@ db_info() {
        "    Date Range: $min_date to $max_date" \
        "    Last Updated: $last_updated"
 
-      ((total_records += records))
+      total_records+=records
     else
       info "  $table: Empty"
     fi
@@ -1158,7 +1165,7 @@ db_info() {
        "Total Records: $total_records"
 
   # Calculate database efficiency
-  if ((total_records > 0)); then
+  if ((total_records)); then
     local -i bytes_per_record
     bytes_per_record=$((db_size / total_records))
     info "Average Record Size: $bytes_per_record bytes"
@@ -1205,7 +1212,7 @@ db_vacuum() {
     local -i size_diff=$((size_before - size_after))
     local -- percent_saved
 
-    if ((size_before > 0)); then
+    if ((size_before)); then
       percent_saved=$(echo "scale=2; ($size_diff * 100) / $size_before" | bc)
     else
       percent_saved="0"
@@ -1260,7 +1267,7 @@ db_check() {
   else
     error "Database integrity: FAILED"
     info  "  Details: $integrity_result"
-    ((errors+=1))
+    errors+=1
   fi
 
   # 2. Schema validation
@@ -1273,13 +1280,13 @@ db_check() {
     info "No tables found (empty database)"
   else
     local -i schema_errors=0
-    local -- table expected_schema actual_schema
+    local -- table actual_schema
 
     for table in "${tables[@]}"; do
       # Check if table name is a valid 3-letter currency code
       if [[ ! "$table" =~ ^[A-Z]{3}$ ]]; then
         warn "Invalid table name (not 3-letter code): $table"
-        ((schema_errors+=1))
+        schema_errors+=1
         continue
       fi
 
@@ -1296,8 +1303,8 @@ db_check() {
         success "  $table: Schema valid"
       else
         error "  $table: Schema invalid or incomplete"
-        ((schema_errors+=1))
-        ((errors+=1))
+        schema_errors+=1
+        errors+=1
       fi
 
       # Check for required indexes
@@ -1306,14 +1313,14 @@ db_check() {
         : # Indexes present
       else
         warn "  $table: Missing indexes"
-        ((schema_errors+=1))
+        schema_errors+=1
       fi
     done
 
-    if ((schema_errors == 0)); then
-      success "All table schemas valid"
-    else
+    if ((schema_errors)); then
       warn "Schema validation completed with $schema_errors issue(s)"
+    else
+      success "All table schemas valid"
     fi
   fi
 
@@ -1328,7 +1335,7 @@ db_check() {
   else
     error "Foreign key violations found:"
     info "$fk_result"
-    ((errors+=1))
+    errors+=1
   fi
 
   # 4. Quick count check
@@ -1341,24 +1348,21 @@ db_check() {
 
     if ((count < 0)); then
       error "  $table: Unable to count records"
-      ((count_errors+=1))
-      ((errors+=1))
+      count_errors+=1
+      errors+=1
     fi
   done
 
-  if ((count_errors == 0)); then
-    success "All tables readable"
-  else
+  if ((count_errors)); then
     error "$count_errors table(s) have read errors"
+  else
+    success "All tables readable"
   fi
 
   # Summary
   info "Summary" "-------"
 
-  if ((errors == 0)); then
-    success "ALL CHECKS PASSED"
-    return 0
-  else
+  if ((errors)); then
     error "CHECKS FAILED: $errors error(s) found"
     info "Recommendations:" \
       "  - Backup your database immediately" \
@@ -1366,6 +1370,9 @@ db_check() {
       "  - If problems persist, consider recreating affected tables"
     return 1
   fi
+
+  success "ALL CHECKS PASSED"
+  return 0
 }
 
 main() {
@@ -1378,7 +1385,7 @@ main() {
     case $1 in
       -C|--config)
         [[ -n "${2:-}" ]] || die 1 "Option ${1@Q} requires an argument"
-        CONFIG_FILE="$2"
+        CONFIG_FILE=$2
         shift 2
         continue
         ;;
@@ -1468,7 +1475,7 @@ main() {
         ;;
       -a|--apikey)
         [[ -n "${2:-}" ]] || die 1 "Option ${1@Q} requires an argument"
-        OPENEXCHANGE_API_KEY="$2"
+        OPENEXCHANGE_API_KEY=$2
         shift
         ;;
       -l|--latest)
@@ -1670,7 +1677,7 @@ main() {
       "INSERT OR REPLACE INTO $base_currency (Date, Currency, Unit, Xchg, Updated)
        VALUES ('$date', '$mu', 1, $xchg, CURRENT_TIMESTAMP)"
 
-    ((processed+=1))
+    processed+=1
     ((VERBOSE==0)) || info "Updated: $mu $date xchg=$xchg"
   done
 
