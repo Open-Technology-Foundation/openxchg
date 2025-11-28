@@ -52,9 +52,9 @@ curl -sSL https://raw.githubusercontent.com/Open-Technology-Foundation/openxchg/
 This will:
 1. Check system requirements and install missing dependencies (Ubuntu/Debian)
 2. Download `openxchg` to `/usr/local/bin`
-3. Create configuration directory and config file at `~/.config/openxchg/config`
-4. Set database path to `/var/lib/openxchg/xchg.db`
-5. Prompt for your OpenExchangeRates.org API key
+3. Create system configuration at `/etc/openxchg/config`
+4. Create database directory at `/var/lib/openxchg/` (world-writable with sticky bit)
+5. Prompt for your OpenExchangeRates.org API key (recommended: use environment variable)
 
 ### Manual Installation
 
@@ -73,7 +73,8 @@ chmod +x openxchg
 # 4. Optional: Install to system path
 sudo cp openxchg /usr/local/bin/
 
-# 5. Set API key (see Configuration section)
+# 5. Set API key (see Configuration section below)
+
 ```
 
 ### Getting an API Key
@@ -97,55 +98,54 @@ export OPENEXCHANGE_API_KEY='your_api_key_here'
 echo "export OPENEXCHANGE_API_KEY='your_api_key_here'" >> ~/.bashrc
 ```
 
-### Configuration Files
+### System Configuration
 
-openxchg supports flexible configuration with precedence:
+openxchg uses a system-wide configuration approach:
 
-**Precedence order**: CLI options > User config > Environment variables > System config > Defaults
+**Precedence order**: CLI options > Environment variables > System config > Defaults
 
 **Configuration locations**:
-- **System config**: `/etc/openxchg/config`
-- **User config**: `~/.config/openxchg/config`
-- **Custom config**: Specify with `-C/--config` option
+- **System config**: `/etc/openxchg/config` (INI format)
+- **Database**: `/var/lib/openxchg/xchg.db` (world-writable with sticky bit)
+- **Currency list**: `/etc/openxchg/update-currencies.list`
 
-### Initialize Configuration
-
-Create a default configuration file:
-
-```bash
-openxchg --init-config
-```
-
-This creates `~/.config/openxchg/config` with all available settings.
+Configuration is **automatically created** on first run. System administrator can edit `/etc/openxchg/config` to adjust system-wide settings.
 
 ### Essential Configuration Options
 
 ```ini
-[api]
-# OpenExchangeRates.org API key
-# (Prefer environment variable for security)
-API_KEY=your_api_key_here
-
-[database]
-# Database path (default: /var/lib/openxchg/xchg.db)
-DB_PATH=/var/lib/openxchg/xchg.db
-
-[general]
+[General]
 # Default base currency (default: IDR)
 DEFAULT_BASE_CURRENCY=IDR
+
+# Verbose output by default (0=quiet, 1=verbose)
+DEFAULT_VERBOSE=1
+
+# Default date for queries (yesterday, today, or YYYY-MM-DD)
+DEFAULT_DATE=yesterday
+
+# Which currencies to update (ALL, CONFIGURED, or path to file)
+UPDATE_CURRENCIES=/etc/openxchg/update-currencies.list
+
+[API]
+# RECOMMENDED: Use environment variable instead
+#   export OPENEXCHANGE_API_KEY='your_key'
+#   Add to ~/.bashrc for persistence
+API_KEY=
+
+[Database]
+# Database path (default: /var/lib/openxchg/xchg.db)
+DB_PATH=/var/lib/openxchg/xchg.db
 ```
 
 ### Configuration Management
 
 ```bash
-# Display effective configuration from all sources
+# Display effective configuration
 openxchg --show-config
 
 # Validate configuration file
 openxchg --check-config
-
-# Use custom config file
-openxchg -C /path/to/config idr usd
 ```
 
 ## Basic Usage
@@ -189,6 +189,9 @@ openxchg -d 2025-01-01 eur usd gbp jpy
 
 # Options can appear anywhere (GNU-style)
 openxchg eur -d 2025-01-15 usd gbp
+
+# Usage in scripts
+read -r currency value date < <(openxchg -q -d 2025-11-10 idr eur)
 ```
 
 ### LATEST Mode: Real-Time Rates
@@ -226,8 +229,6 @@ GBP         21989.647286    2025-11-14
 | `-d, --date DATE` | Specify date (default: yesterday) |
 | `-a, --apikey KEY` | Use custom API key |
 | `-l, --latest` | Fetch real-time rates (not stored) |
-| `-C, --config FILE` | Use alternative config file |
-| `--init-config` | Create default config file |
 | `--show-config` | Display effective configuration |
 | `--check-config` | Validate configuration file |
 

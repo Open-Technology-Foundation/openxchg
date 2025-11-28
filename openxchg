@@ -11,18 +11,17 @@
 # Supported: 169 currencies from OpenExchange API
 
 set -euo pipefail
-shopt -s inherit_errexit shift_verbose extglob nullglob
+shopt -s inherit_errexit extglob nullglob
 
 declare -r VERSION='1.0.0'
 #shellcheck disable=SC2155
 declare -r SCRIPT_PATH=$(realpath -e -- "$0")
-declare -r SCRIPT_DIR=${SCRIPT_PATH%/*} SCRIPT_NAME=${SCRIPT_PATH##*/}
+declare -r SCRIPT_NAME=${SCRIPT_PATH##*/}
 
 # Configuration file settings
-declare -r SYSTEM_CONFIG_FILE="/etc/openxchg/config"
-declare -- CONFIG_FILE="${HOME}/.config/openxchg/config"
-declare -- CONFIG_DIR="${HOME}/.config/openxchg"
-declare -- CURRENCIES_FILE="${CONFIG_DIR}/currencies.json"
+declare -r CONFIG_FILE="${CONFIG_FILE:-/etc/openxchg/config}"
+declare -r CONFIG_DIR="${CONFIG_DIR:-/etc/openxchg}"
+declare -r CURRENCIES_FILE="${CURRENCIES_FILE:-/var/lib/openxchg/currencies.json}"
 declare -- CONFIG_DEFAULT_BASE_CURRENCY=''
 declare -- CONFIG_DEFAULT_VERBOSE=''
 declare -- CONFIG_DEFAULT_DATE=''
@@ -31,7 +30,7 @@ declare -- CONFIG_DB_PATH=''
 declare -- CONFIG_AUTO_UPDATE_CURRENCY_LIST=''
 declare -- CONFIG_UPDATE_CURRENCIES=''
 
-declare -- DB_PATH="$SCRIPT_DIR"/xchg.db
+declare -- DB_PATH="${DB_PATH:-/var/lib/openxchg/xchg.db}"
 
 declare -r OPENEXCHANGE_HISTORICAL_URL='https://openexchangerates.org/api/historical/'
 declare -r OPENEXCHANGE_LATEST_URL='https://openexchangerates.org/api/latest.json'
@@ -39,13 +38,13 @@ declare -- OPENEXCHANGE_API_KEY=${OPENEXCHANGE_API_KEY:-'2a9989da6985438481f9a5f
 
 declare -a MU=( AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND BOB BRL BSD BTC BTN BWP BYN BZD CAD CDF CHF CLF CLP CNH CNY COP CRC CUC CUP CVE CZK DJF DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GGP GHS GIP GMD GNF GTQ GYD HKD HNL HRK HTG HUF IDR ILS IMP INR IQD IRR ISK JEP JMD JOD JPY KES KGS KHR KMF KPW KRW KWD KYD KZT LAK LBP LKR LRD LSL LYD MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD OMR PAB PEN PGK PHP PKR PLN PYG QAR RON RSD RUB RWF SAR SBD SCR SDG SEK SGD SHP SLL SOS SRD SSP STD STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD TWD TZS UAH UGX USD UYU UZS VND VUV WST XAF XAG XAU XCD XDR XOF XPD XPF XPT YER ZAR ZMW ZWL )
 
-declare -r TMPFILE=/tmp/"$SCRIPT_NAME"-"$RANDOM"-"$$"
+declare -r TMPFILE=/tmp/"$SCRIPT_NAME"-"$$"-"$RANDOM"
 
 declare -i VERBOSE=1
 declare -i LATEST_MODE=0
 declare -i UPDATE_ALL_CURRENCIES=0
 
-trap '{ cleanup $?; }' EXIT
+trap '{ cleanup $?; }' SIGINT SIGTERM EXIT
 
 # Color definitions
 if [[ -t 1 && -t 2 ]]; then
@@ -92,7 +91,6 @@ die() { (($# > 1)) && error "${@:2}"; exit "${1:-0}"; }
 #
 load_config() {
   local -- config_file=$1
-  local -- mode="${2:-normal}"
   local -- section='' key value line
 
   [[ -f "$config_file" ]] || return 0
@@ -124,18 +122,12 @@ load_config() {
       value="${value#"${value%%[![:space:]]*}"}"
       value="${value%"${value##*[![:space:]]}"}"
 
-      # Map to global config variables (skip if already set in fallback mode)
+      # Map to global config variables
       case "$section:$key" in
         General:DEFAULT_BASE_CURRENCY)
-          if [[ "$mode" == "fallback" && -n "${CONFIG_DEFAULT_BASE_CURRENCY}" ]]; then
-            continue
-          fi
           CONFIG_DEFAULT_BASE_CURRENCY="${value^^}"
           ;;
         General:DEFAULT_VERBOSE)
-          if [[ "$mode" == "fallback" && -n "${CONFIG_DEFAULT_VERBOSE}" ]]; then
-            continue
-          fi
           if [[ "$value" =~ ^[01]$ ]]; then
             CONFIG_DEFAULT_VERBOSE="$value"
           else
@@ -143,15 +135,9 @@ load_config() {
           fi
           ;;
         General:DEFAULT_DATE)
-          if [[ "$mode" == "fallback" && -n "${CONFIG_DEFAULT_DATE}" ]]; then
-            continue
-          fi
           CONFIG_DEFAULT_DATE="$value"
           ;;
         General:AUTO_UPDATE_CURRENCY_LIST)
-          if [[ "$mode" == "fallback" && -n "${CONFIG_AUTO_UPDATE_CURRENCY_LIST}" ]]; then
-            continue
-          fi
           if [[ "$value" =~ ^(true|false)$ ]]; then
             CONFIG_AUTO_UPDATE_CURRENCY_LIST="$value"
           else
@@ -159,21 +145,12 @@ load_config() {
           fi
           ;;
         General:UPDATE_CURRENCIES)
-          if [[ "$mode" == "fallback" && -n "${CONFIG_UPDATE_CURRENCIES}" ]]; then
-            continue
-          fi
           CONFIG_UPDATE_CURRENCIES="$value"
           ;;
         API:API_KEY)
-          if [[ "$mode" == "fallback" && -n "${CONFIG_API_KEY}" ]]; then
-            continue
-          fi
           CONFIG_API_KEY="$value"
           ;;
         Database:DB_PATH)
-          if [[ "$mode" == "fallback" && -n "${CONFIG_DB_PATH}" ]]; then
-            continue
-          fi
           CONFIG_DB_PATH="$value"
           ;;
         *)
@@ -181,154 +158,155 @@ load_config() {
           ;;
       esac
     else
-      warn "Invalid config line in ${config_file@Q}: ${line@Q}"
+      warn "Invalid config line in ${config_file@Q}: $line"
     fi
   done < "$config_file"
 }
 
 #
-# create_default_config - Create default configuration file
+# auto_initialize - Auto-create system config on first run
 #
-# Creates a well-commented default config file at the specified path.
-# If file exists, creates a backup with .bak extension.
+# Detects first run and creates /etc/openxchg/ with default config files.
+# Uses sudo if needed. Creates /var/lib/openxchg/ with sticky bit.
+# Idempotent: safe to call multiple times.
 #
-# Arguments:
-#   $1 - Path to config file to create
+# Returns:
+#   0 on success or if already initialized
+#   1 on failure
 #
-create_default_config() {
-  local -- config_file=$1
-  local -- config_dir="${config_file%/*}"
+auto_initialize() {
+  # Already initialized? Check both config AND currency list exist
+  local -r currency_list="$CONFIG_DIR/update-currencies.list"
+  [[ -f "$CONFIG_FILE" && -f "$currency_list" ]] && return 0
 
-  # Create config directory if it doesn't exist
-  if [[ ! -d "$config_dir" ]]; then
-    mkdir -p "$config_dir" || die 1 "Failed to create config directory ${config_dir@Q}"
-    info "Created config directory ${config_dir@Q}"
+  info "First run detected - initializing system configuration..."
+
+  # Determine if we need sudo
+  local -i need_sudo=0
+  if [[ ! -w /etc ]]; then
+    need_sudo=1
+    if ! command -v sudo &>/dev/null; then
+      die 1 \
+        "Cannot create /etc/openxchg/ (permission denied and sudo not available)" \
+        "" \
+        "Manual setup required:" \
+        "  1. sudo mkdir -p /etc/openxchg /var/lib/openxchg" \
+        "  2. sudo chmod 1777 /var/lib/openxchg" \
+        "  3. sudo openxchg --help  # Re-run to complete initialization"
+    fi
   fi
 
-  # Backup existing config file
-  if [[ -f "$config_file" ]]; then
-    cp "$config_file" "$config_file.bak" || die 1 "Failed to backup existing config"
-    info "Backed up existing config to $config_file.bak"
+  # Create /etc/openxchg/ directory
+  if ((need_sudo)); then
+    info "Creating system configuration (requires sudo)..."
+    sudo mkdir -p "$CONFIG_DIR" || die 1 "Failed to create ${CONFIG_DIR@Q}"
+  else
+    mkdir -p "$CONFIG_DIR" || die 1 "Failed to create ${CONFIG_DIR@Q}"
   fi
 
-  # Create default config file
-  cat > "$config_file" <<'EOF'
-# openxchg configuration file
-# This file uses INI-style format with [Sections] and key=value pairs
-# Lines starting with # or ; are comments
+  # Create config file (skip if exists)
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    local -- temp_config="/tmp/openxchg-config-$$"
+    cat > "$temp_config" <<'EOF'
+# openxchg system configuration
+# All users share these settings
+# Edit with: sudo editor /etc/openxchg/config
 
 [General]
-# Default base currency (3-letter ISO code, case-insensitive)
-# This is used when no base currency is specified on command line
-# Default: IDR
 DEFAULT_BASE_CURRENCY=IDR
-
-# Default verbosity (0=quiet, 1=verbose)
-# Controls whether progress messages are displayed
-# Default: 1
 DEFAULT_VERBOSE=1
-
-# Default date for queries/updates
-# Options: yesterday, today, or specific date (YYYY-MM-DD)
-# Note: API requires historical dates, 'today' may not have data yet
-# Default: yesterday
 DEFAULT_DATE=yesterday
-
-# Auto-update currency list from API
-# If true, automatically fetches latest currency list once per day
-# Requires currencies.json to exist (create with: openxchg -U)
-# Default: true
 AUTO_UPDATE_CURRENCY_LIST=true
-
-# Which currencies to update in UPDATE mode
-# Options:
-#   ALL                                        - Update all currencies (default)
-#   CONFIGURED                                 - Use currencies from currencies.json
-#   /path/to/update-currencies.list           - Custom list file (one currency per line)
-# Note: This only affects UPDATE mode. QUERY mode can access any currency in database.
-# Tip: Use 'openxchg --init-config' to create update-currencies.list.example
-# Default: ALL
-UPDATE_CURRENCIES=ALL
+UPDATE_CURRENCIES=/etc/openxchg/update-currencies.list
 
 [API]
-# OpenExchangeRates API key
-# Precedence: CLI option (-a/--apikey) > Environment variable (OPENEXCHANGE_API_KEY) > This file
-# SECURITY: If set here, ensure this file has mode 0600 (chmod 600 config)
-# Recommended: Leave empty and use environment variable instead
-# Default: (empty - uses environment variable)
+# RECOMMENDED: Use environment variable instead
+#   export OPENEXCHANGE_API_KEY='your_key'
+#   Add to ~/.bashrc for persistence
+# Precedence: CLI option (-a) > Environment > This file
 API_KEY=
 
 [Database]
-# Database file location
-# Can be absolute path or relative to script directory
-# Default: xchg.db (in script directory)
-DB_PATH=xchg.db
-
-# Usage examples:
-#   DB_PATH=xchg.db                    # Same directory as script
-#   DB_PATH=/var/lib/openxchg/xchg.db  # Absolute path
-#   DB_PATH=~/.local/share/openxchg/xchg.db  # User's home directory
+DB_PATH=/var/lib/openxchg/xchg.db
 EOF
 
-  chmod 600 "$config_file" || die 1 "Failed to set permissions on config file"
+    if ((need_sudo)); then
+      sudo mv "$temp_config" "$CONFIG_FILE" || die 1 "Failed to create config file"
+      sudo chmod 644 "$CONFIG_FILE"
+    else
+      mv "$temp_config" "$CONFIG_FILE" || die 1 "Failed to create config file"
+      chmod 644 "$CONFIG_FILE"
+    fi
+    success "Created ${CONFIG_FILE@Q}"
+  fi
 
-  info "Created default config file: $config_file"
-  info "File permissions set to 0600 (owner read/write only)"
-  echo
-  info "Edit this file to customize your defaults, or use command-line options to override."
-}
-
-#
-# create_default_currency_list - Create example currency list file
-#
-# Creates a well-commented example update-currencies.list file with
-# commonly used currencies. File is created as .example to prevent
-# accidental activation.
-#
-create_default_currency_list() {
-  local -- list_file="${CONFIG_DIR}/update-currencies.list.example"
-
-  # Create config directory if needed
-  [[ -d "$CONFIG_DIR" ]] || mkdir -p "$CONFIG_DIR"
-
-  # Create example currency list
-  cat > "$list_file" <<'EOF'
+  # Create currency list file (skip if exists)
+  if [[ ! -f "$currency_list" ]]; then
+    local -- temp_list=/tmp/openxchg-currencies-"$$"
+    cat > "$temp_list" <<'EOF'
 # openxchg - Currency Update List
-#
-# This file defines which currencies to update in UPDATE mode.
-# One currency code per line (3-letter ISO codes, case-insensitive).
-# Lines starting with # are comments and blank lines are ignored.
-#
-# To activate:
-#   1. Copy this file: cp update-currencies.list.example update-currencies.list
-#   2. Edit to add/remove currencies as needed
-#   3. Update config file: UPDATE_CURRENCIES=/path/to/update-currencies.list
-#   4. Run update: openxchg idr
-#
-# Note: QUERY mode can still access any currency in the database,
-#       regardless of what's in this list.
+# One currency per line (3-letter ISO codes)
 
 # Major world currencies
-USD    # United States Dollar
-EUR    # Euro
-GBP    # British Pound Sterling
-JPY    # Japanese Yen
-CNY    # Chinese Yuan
+USD
+EUR
+GBP
+JPY
+CNY
 
 # Asia-Pacific
-IDR    # Indonesian Rupiah
-AUD    # Australian Dollar
-SGD    # Singapore Dollar
-MYR    # Malaysian Ringgit
-THB    # Thai Baht
+IDR
+AUD
+SGD
+MYR
+THB
 
-# Add more currencies as needed...
-# See currencies.json for full list of 173 currencies
+# Add more currencies as needed
+# Run 'openxchg -U' to see full list of supported currencies
 EOF
 
-  chmod 600 "$list_file" 2>/dev/null || true
+    if ((need_sudo)); then
+      sudo mv "$temp_list" "$currency_list" || die 1 "Failed to create currency list"
+      sudo chmod 644 "$currency_list"
+    else
+      mv "$temp_list" "$currency_list" || die 1 "Failed to create currency list"
+      chmod 644 "$currency_list"
+    fi
+    success "Created ${currency_list@Q}"
+  fi
 
-  info "Created example currency list: $list_file"
+  # Create /var/lib/openxchg/ with sticky bit
+  if [[ ! -d /var/lib/openxchg ]]; then
+    if [[ -w /var/lib ]]; then
+      mkdir -p /var/lib/openxchg || die 1 "Failed to create /var/lib/openxchg"
+      chmod 1777 /var/lib/openxchg
+    elif command -v sudo &>/dev/null; then
+      sudo mkdir -p /var/lib/openxchg || die 1 "Failed to create /var/lib/openxchg"
+      sudo chmod 1777 /var/lib/openxchg
+    else
+      die 1 'Cannot create /var/lib/openxchg (permission denied)'
+    fi
+    success "Created '/var/lib/openxchg/' (world-writable with sticky bit)"
+  fi
+
+  # Display setup instructions
+  info 'System configuration initialized successfully!' \
+       '' \
+       "Configuration: /etc/openxchg/config" \
+       "Currency list: /etc/openxchg/update-currencies.list" \
+       "Database: /var/lib/openxchg/xchg.db" \
+       "" \
+       "NEXT STEPS:" \
+       "  1. Set your API key (required for updates):" \
+       "     export OPENEXCHANGE_API_KEY='your_api_key_here'" \
+       "     Add to ~/.bashrc to make permanent" \
+       "" \
+       "  2. Get a free API key at:" \
+       "     https://openexchangerates.org/signup/free" \
+       "" \
+       "  3. Test with: openxchg idr usd eur"
+
+  return 0
 }
 
 #
@@ -353,17 +331,17 @@ validate_config() {
   local -- section='' line key value
   local -i line_num=0
 
-  info "Validating Configuration: $config_file" "========================================" ''
+  info "Validating Configuration ${config_file@Q}" "========================================" ''
 
   # Check if file exists
   if [[ ! -f "$config_file" ]]; then
-    error "Config file not found: $config_file"
+    error "Config file not found ${config_file@Q}"
     return 1
   fi
 
   # Check if file is readable
   if [[ ! -r "$config_file" ]]; then
-    error "Config file not readable: $config_file"
+    error "Config file not readable ${config_file@Q}"
     return 1
   fi
 
@@ -404,7 +382,7 @@ validate_config() {
 
       # Validate key format
       if [[ ! "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
-        warn "Line $line_num: Key should be UPPERCASE_WITH_UNDERSCORES: $key"
+        warn "Line $line_num: Key should be UPPERCASE_WITH_UNDERSCORES: ${key@Q}"
         warnings+=1
       fi
 
@@ -532,7 +510,7 @@ validate_config() {
               local -- parent_dir
               parent_dir=$(dirname "$value")
               if [[ ! -d "$parent_dir" ]]; then
-                warn "DB_PATH parent directory does not exist: $parent_dir"
+                warn "DB_PATH parent directory does not exist ${parent_dir@Q}"
                 warnings+=1
               else
                 success "DB_PATH: $value (parent directory exists)"
@@ -571,7 +549,7 @@ validate_config() {
   if [[ "$perms" != "600" ]] && [[ "$perms" != "400" ]]; then
     # Check if API key is set in file
     if grep -q '^[[:space:]]*API_KEY=.' "$config_file"; then
-      warn "Config contains API_KEY but is not mode 600/400 (current: $perms)"
+      warn "Config contains API_KEY but is not mode 600/400 (current ${perms@Q})"
       info "  Recommendation: chmod 600 $config_file"
       warnings+=1
     else
@@ -594,7 +572,7 @@ validate_config() {
 
   # Check UPDATE_CURRENCIES setting for performance
   if grep -q '^[[:space:]]*UPDATE_CURRENCIES=ALL' "$config_file"; then
-    info "UPDATE_CURRENCIES=ALL will update all 173 currencies (consider selective list for faster updates)"
+    info "UPDATE_CURRENCIES=ALL will update all currencies (consider selective list for faster updates)"
     info+=1
   fi
 
@@ -647,65 +625,50 @@ validate_config() {
 # with indication of which source each value comes from.
 #
 show_config() {
-  local -- base_source verbose_source date_source dbpath_source autoupdate_source updatecurr_source
   local -i saved_verbose=$VERBOSE
 
   # Temporarily enable verbose for show_config regardless of user setting
   VERBOSE=1
 
-  info "Current Configuration (effective values)" "========================================" ''
+  info "Current Configuration" "=====================" ""
 
-  info "System Config File: ${SYSTEM_CONFIG_FILE}"
-  if [[ -f "${SYSTEM_CONFIG_FILE}" ]]; then
-    if [[ -r "${SYSTEM_CONFIG_FILE}" ]]; then
-      info "  Status: Found and readable"
-    else
-      info "  Status: Found but not readable (insufficient permissions)"
-    fi
+  info "Configuration File: ${CONFIG_FILE}"
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    info "  Status: Found"
   else
-    info "  Status: Not found"
+    warn "  Status: Not found (will be auto-created on first run)"
   fi
 
-  info "User Config File: ${CONFIG_FILE}"
-  [[ -f "${CONFIG_FILE}" ]] && info "  Status: Found" || info "  Status: Not found"
+  info "" "Settings:"
+  info "  DEFAULT_BASE_CURRENCY: ${CONFIG_DEFAULT_BASE_CURRENCY:-IDR}"
+  info "  DEFAULT_VERBOSE: ${CONFIG_DEFAULT_VERBOSE:-1}"
+  info "  DEFAULT_DATE: ${CONFIG_DEFAULT_DATE:-yesterday}"
+  info "  AUTO_UPDATE_CURRENCY_LIST: ${CONFIG_AUTO_UPDATE_CURRENCY_LIST:-true}"
+  info "  UPDATE_CURRENCIES: ${CONFIG_UPDATE_CURRENCIES:-ALL}"
+  info "  DB_PATH: ${CONFIG_DB_PATH:-/var/lib/openxchg/xchg.db}"
 
-  # Determine sources
-  [[ -n "${CONFIG_DEFAULT_BASE_CURRENCY}" ]] && base_source="config" || base_source="default"
-  [[ -n "${CONFIG_DEFAULT_VERBOSE}" ]] && verbose_source="config" || verbose_source="default"
-  [[ -n "${CONFIG_DEFAULT_DATE}" ]] && date_source="config" || date_source="default"
-  [[ -n "${CONFIG_DB_PATH}" ]] && dbpath_source="config" || dbpath_source="default"
-  [[ -n "${CONFIG_AUTO_UPDATE_CURRENCY_LIST}" ]] && autoupdate_source="config" || autoupdate_source="default"
-  [[ -n "${CONFIG_UPDATE_CURRENCIES}" ]] && updatecurr_source="config" || updatecurr_source="default"
-
-  info "Settings:"
-  info "  DEFAULT_BASE_CURRENCY: ${CONFIG_DEFAULT_BASE_CURRENCY:-IDR} ($base_source)"
-  info "  DEFAULT_VERBOSE: ${CONFIG_DEFAULT_VERBOSE:-1} ($verbose_source)"
-  info "  DEFAULT_DATE: ${CONFIG_DEFAULT_DATE:-yesterday} ($date_source)"
-  info "  AUTO_UPDATE_CURRENCY_LIST: ${CONFIG_AUTO_UPDATE_CURRENCY_LIST:-true} ($autoupdate_source)"
-  info "  UPDATE_CURRENCIES: ${CONFIG_UPDATE_CURRENCIES:-ALL} ($updatecurr_source)"
-  info "  DB_PATH: ${CONFIG_DB_PATH:-$SCRIPT_DIR/xchg.db} ($dbpath_source)"
-
-  if [[ -n "${CONFIG_API_KEY}" ]]; then
-    info "  API_KEY: ****${CONFIG_API_KEY: -4} (config file)"
-  elif [[ -n "${OPENEXCHANGE_API_KEY}" ]]; then
+  if [[ -n "${OPENEXCHANGE_API_KEY:-}" ]]; then
     info "  API_KEY: ****${OPENEXCHANGE_API_KEY: -4} (environment variable)"
+  elif [[ -n "${CONFIG_API_KEY}" ]]; then
+    info "  API_KEY: ****${CONFIG_API_KEY: -4} (config file)"
   else
-    info "  API_KEY: (not set)"
+    warn "  API_KEY: Not set (set with: export OPENEXCHANGE_API_KEY='your_key')"
   fi
 
-  info "Currency List: ${CURRENCIES_FILE}"
+  info "" "Currency List: ${CURRENCIES_FILE}"
   if [[ -f "${CURRENCIES_FILE}" ]]; then
     local -i count
     count=$(jq -r '.count // 0' "$CURRENCIES_FILE" 2>/dev/null || echo 0)
     local -- last_updated
     last_updated=$(jq -r '.last_updated // "unknown"' "$CURRENCIES_FILE" 2>/dev/null || echo "unknown")
-    info "  Status: Found ($count currencies) Updated: $last_updated"
+    info "  Status: Found ($count currencies)" \
+         "  Last Updated: $last_updated"
   else
-    warn "  Status: Not found (using hardcoded list)" \
-         "  Tip: Run 'openxchg -U' to fetch latest currency list"
+    info "  Status: Not found" \
+         "  Run 'openxchg -U' to fetch from API"
   fi
 
-  info "Precedence: CLI options > User config > Environment > System config > Defaults"
+  info "" "Precedence: CLI options > Environment > System config > Defaults"
 
   # Restore previous verbose setting
   VERBOSE=$saved_verbose
@@ -720,27 +683,6 @@ show_config() {
 # Arguments:
 #   $1 - Path to config file
 #
-check_config_security() {
-  local -- config_file=$1
-
-  [[ -f "$config_file" ]] || return 0
-  [[ -n "${CONFIG_API_KEY}" ]] || return 0
-
-  # Check file permissions (stat -c %a gives octal mode)
-  local -- perms
-  perms=$(stat -c %a "$config_file" 2>/dev/null || echo "000")
-
-  # Check if group or world readable (last two digits > 0)
-  local -i group_perms=$((10#${perms:1:1}))
-  local -i world_perms=$((10#${perms:2:1}))
-
-  if ((group_perms > 0 || world_perms > 0)); then
-    warn "Config file ${config_file@Q} contains API_KEY but is readable by others" \
-         "  Current permissions: $perms (should be 600)" \
-         "  Fix with: chmod 600 ${config_file@Q}"
-  fi
-}
-
 #
 # fetch_currencies - Fetch and update currency list from API
 #
@@ -766,8 +708,15 @@ fetch_currencies() {
     return 1
   fi
 
-  # Create config directory if needed
-  [[ -d "$CONFIG_DIR" ]] || mkdir -p "$CONFIG_DIR"
+  # Create database directory if needed (currencies.json goes in /var/lib now)
+  if [[ ! -d /var/lib/openxchg ]]; then
+    if [[ -w /var/lib ]]; then
+      mkdir -p /var/lib/openxchg
+      chmod 1777 /var/lib/openxchg
+    else
+      die 1 "Cannot create /var/lib/openxchg - run: sudo mkdir -p /var/lib/openxchg && sudo chmod 1777 /var/lib/openxchg"
+    fi
+  fi
 
   # Build currencies.json with metadata
   local -- timestamp
@@ -790,7 +739,8 @@ fetch_currencies() {
       currencies: $currencies[0]
     }' > "$CURRENCIES_FILE"
 
-  chmod 600 "$CURRENCIES_FILE" 2>/dev/null || true
+  # Make world-writable so any user can update
+  chmod 666 "$CURRENCIES_FILE" 2>/dev/null || true
 
   info "Currency list updated successfully" \
        "  File: $CURRENCIES_FILE" \
@@ -1014,7 +964,7 @@ get_update_currency_list() {
 #
 check_auto_update_currencies() {
   # Skip if auto-update is disabled
-  [[ "${CONFIG_AUTO_UPDATE_CURRENCY_LIST}" == "true" ]] || return 0
+  [[ "${CONFIG_AUTO_UPDATE_CURRENCY_LIST}" == true ]] || return 0
 
   # Skip if currencies file doesn't exist (will be created on first -U)
   [[ -f "$CURRENCIES_FILE" ]] || return 0
@@ -1377,31 +1327,9 @@ main() {
   local -- dte timestamp date mu base_currency
   local -a positional_args=()
 
-  # First pass: check for -C/--config option to set custom config file
-  local -a saved_args=("$@")
-  while (($#)); do
-    case $1 in
-      -C|--config)
-        [[ -n "${2:-}" ]] || die 1 "Option ${1@Q} requires an argument"
-        CONFIG_FILE=$2
-        shift 2
-        continue
-        ;;
-    esac
-    shift
-  done
-
-  # Restore arguments for main parsing
-  set -- "${saved_args[@]}"
-
-  # Load system-wide configuration first (fallback mode - only sets unset values)
-  load_config "$SYSTEM_CONFIG_FILE" "fallback"
-
-  # Load user configuration file (normal mode - overrides system config)
+  # Auto-initialize on first run, then load config
+  auto_initialize
   load_config "$CONFIG_FILE"
-
-  # Check config file security if API key is set
-  check_config_security "$CONFIG_FILE"
 
   # Apply config defaults (can be overridden by CLI options later)
   [[ -z "${CONFIG_DEFAULT_VERBOSE}" ]] || VERBOSE="${CONFIG_DEFAULT_VERBOSE}"
@@ -1432,11 +1360,6 @@ main() {
         echo "$SCRIPT_NAME $VERSION"
         exit 0
         ;;
-      --init-config)
-        create_default_config "$CONFIG_FILE"
-        create_default_currency_list
-        exit 0
-        ;;
       --show-config)
         show_config
         exit 0
@@ -1460,11 +1383,6 @@ main() {
       -U|--update-currencies)
         fetch_currencies
         exit $?
-        ;;
-      -C|--config)
-        # Already handled in first pass, skip argument
-        [[ -n "${2:-}" ]] || die 1 "Option ${1@Q} requires an argument"
-        shift
         ;;
       -v|--verbose)
         VERBOSE=1
@@ -1704,7 +1622,7 @@ openxchg - Multi-currency exchange rate database manager
 
 Fetches exchange rates from openexchangerates.org and stores them in SQLite.
 Each base currency gets its own table (e.g., IDR, USD, EUR, GBP). Supports
-169 currencies. Currency codes are case-insensitive. Options can appear
+> 170 currencies. Currency codes are case-insensitive. Options can appear
 anywhere in the command line.
 
 Usage: openxchg [OPTIONS] [base_currency] [CurrencyCode]...
@@ -1718,8 +1636,6 @@ Options:
   -U, --update-currencies
                       Fetch and update currency list from API
 
-  -C, --config FILE   Use alternative config file (default: ~/.config/openxchg/config)
-  --init-config       Create default config file (backs up existing)
   --show-config       Display current effective configuration
   --check-config      Validate configuration file (syntax, values, security)
   --db-info           Display database statistics and information
@@ -1780,10 +1696,8 @@ Examples:
   openxchg --version
 
   # Configuration management
-  openxchg --init-config             # Create default config file
   openxchg --show-config             # Display effective configuration
   openxchg --check-config            # Validate configuration file
-  openxchg -C /path/to/config idr    # Use custom config file
 
   # Currency management
   openxchg -U                        # Fetch/update currency list from API
@@ -1800,15 +1714,17 @@ Examples:
   openxchg --db-check                # Verify database integrity
 
 Configuration:
-  Config file: ~/.config/openxchg/config (INI format)
+  System config: /etc/openxchg/config (INI format)
+  Database: /var/lib/openxchg/xchg.db
+  Currency list: /etc/openxchg/update-currencies.list
 
-  The script loads settings from the config file if it exists. Command-line
-  options always override config file settings.
+  Configuration is auto-initialized on first run. System administrator can edit
+  /etc/openxchg/config to adjust system-wide settings.
 
   Precedence (highest to lowest):
     1. Command-line options
-    2. Config file settings
-    3. Environment variables (API key only)
+    2. Environment variables (API key)
+    3. System config file
     4. Built-in defaults
 
   Supported settings:
@@ -1817,16 +1733,19 @@ Configuration:
       DEFAULT_VERBOSE           - Verbosity 0=quiet, 1=verbose (default: 1)
       DEFAULT_DATE              - Default date: yesterday, today, YYYY-MM-DD (default: yesterday)
       AUTO_UPDATE_CURRENCY_LIST - Auto-update currencies daily: true/false (default: true)
-      UPDATE_CURRENCIES         - Currencies to update: ALL, CONFIGURED, or file path (default: ALL)
+      UPDATE_CURRENCIES         - Currencies to update: ALL, CONFIGURED, or file path (default: /etc/openxchg/update-currencies.list)
 
     [API]
-      API_KEY                   - OpenExchangeRates API key (recommended: use env var)
+      API_KEY                   - OpenExchangeRates API key
+                                  RECOMMENDED: Use environment variable instead
+                                    export OPENEXCHANGE_API_KEY='your_key'
+                                    Add to ~/.bashrc for persistence
 
     [Database]
-      DB_PATH                   - Database file path (default: xchg.db in script dir)
+      DB_PATH                   - Database file path (default: /var/lib/openxchg/xchg.db)
 
   Currency List Management:
-    The script maintains a currency list in ~/.config/openxchg/currencies.json
+    The script maintains a currency list in /var/lib/openxchg/currencies.json
 
     - Use -U to fetch the latest list from OpenExchangeRates API (169+ currencies)
     - If AUTO_UPDATE_CURRENCY_LIST=true, automatically updates once per day
@@ -1836,30 +1755,31 @@ Configuration:
   Selective Currency Updates:
     Control which currencies are updated in UPDATE mode using UPDATE_CURRENCIES:
 
-    - ALL (default): Update all 173 currencies
+    - ALL (default): Update all 169 currencies
     - CONFIGURED: Update currencies from currencies.json
-    - /path/to/file: Custom list (one currency per line)
+    - /etc/openxchg/update-currencies.list: System currency list (default)
 
-    Example setup:
-      1. openxchg --init-config                 # Creates update-currencies.list.example
-      2. cp ~/.config/openxchg/update-currencies.list.example \
-            ~/.config/openxchg/update-currencies.list
-      3. Edit update-currencies.list to your needs
-      4. Set UPDATE_CURRENCIES=update-currencies.list in config
-      5. openxchg idr                           # Updates only listed currencies
+    System administrator can edit /etc/openxchg/update-currencies.list to customize
+    which currencies are updated for all users.
 
     Override with --all flag to temporarily update all currencies:
       openxchg --all idr                        # Ignores UPDATE_CURRENCIES setting
 
     Note: QUERY mode can access any currency in database regardless of update list
 
-  Security:
-    If API_KEY is set in config file, ensure file mode is 0600 (owner read/write only).
-    The script will warn if permissions are too open but will continue execution.
-
   First-time setup:
-    openxchg --init-config   # Creates config file with defaults and examples
-    vi ~/.config/openxchg/config  # Edit to customize your settings
+    1. Run any openxchg command to auto-initialize:
+       openxchg --help
+
+    2. Set your API key (required for updates):
+       export OPENEXCHANGE_API_KEY='your_api_key_here'
+       echo "export OPENEXCHANGE_API_KEY='your_key'" >> ~/.bashrc
+
+    3. Get a free API key at:
+       https://openexchangerates.org/signup/free
+
+    4. Test with a query:
+       openxchg idr usd eur
 
 Output Format:
   Currency    Xchg            Date (UTC)

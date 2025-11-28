@@ -15,7 +15,7 @@ shopt -s inherit_errexit extglob nullglob
 
 # Installation configuration
 declare -r INSTALL_DIR=/usr/local/bin
-declare -r CONFIG_DIR="$HOME"/.config/openxchg
+declare -r CONFIG_DIR=/etc/openxchg
 declare -r REPO_URL='https://raw.githubusercontent.com/Open-Technology-Foundation/openxchg/main'
 declare -r VERSION='1.0.0'
 
@@ -195,16 +195,23 @@ setup_database() {
 
   # Create database directory
   if [[ -d "$db_dir" ]]; then
-    success "Database directory already exists: $db_dir"
+    # Update permissions if exists
+    if command_exists sudo; then
+      sudo chmod 1777 "$db_dir"
+    elif [[ -w "$db_dir" ]]; then
+      chmod 1777 "$db_dir"
+    fi
+    success "Database directory exists: $db_dir"
   elif [[ -w /var/lib ]]; then
     mkdir -p "$db_dir"
-    success "Database directory created: $db_dir"
+    chmod 1777 "$db_dir"
+    success "Database directory created: $db_dir (world-writable with sticky bit)"
   elif command_exists sudo; then
     sudo mkdir -p "$db_dir"
-    sudo chown "$USER":"$USER" "$db_dir"
-    success "Database directory created: $db_dir"
+    sudo chmod 1777 "$db_dir"
+    success "Database directory created: $db_dir (world-writable with sticky bit)"
   else
-    warn "Cannot create $db_dir. Database will be created in user directory."
+    warn "Cannot create $db_dir. Will be created on first run."
     return 1
   fi
 
@@ -215,18 +222,34 @@ setup_database() {
 # Setup configuration
 #------------------------------------------------------------------------------
 setup_config() {
-  info 'Setting up configuration...'
-
-  # Create config directory
-  [[ -d "$CONFIG_DIR" ]] || mkdir -p "$CONFIG_DIR"
+  info 'Setting up system configuration...'
 
   local -r config_file="$CONFIG_DIR"/config
+  local -r currency_list="$CONFIG_DIR"/update-currencies.list
+
+  # Check if we need sudo
+  local -i need_sudo=0
+  if [[ ! -w /etc ]]; then
+    need_sudo=1
+    if ! command_exists sudo; then
+      warn "Cannot create system config (no sudo). Will auto-initialize on first run."
+      return 1
+    fi
+  fi
+
+  # Create config directory
+  if [[ ! -d "$CONFIG_DIR" ]]; then
+    if ((need_sudo)); then
+      sudo mkdir -p "$CONFIG_DIR" || return 1
+    else
+      mkdir -p "$CONFIG_DIR" || return 1
+    fi
+  fi
 
   # Check if config already exists
   if [[ -f "$config_file" ]]; then
-    warn "Configuration file already exists ${config_file@Q}"
-    read -rp 'Overwrite? (y/N): ' response
-    [[ "$response" =~ ^[Yy]$ ]] || return 0
+    info "Configuration file already exists ${config_file@Q}"
+    return 0
   fi
 
   # Prompt for API key
@@ -234,63 +257,94 @@ setup_config() {
   info 'OpenExchangeRates.org API Key Setup'
   print '  Get your free API key at: https://openexchangerates.org/signup/free' \
         '  (Free tier: 1,000 requests/month with historical data)' ''
-  read -rp 'Enter your API key (or press Enter to skip): ' api_key
+  print '  RECOMMENDED: Use environment variable instead of config file' \
+        '    export OPENEXCHANGE_API_KEY="your_key"' \
+        '    echo "export OPENEXCHANGE_API_KEY=\"your_key\"" >> ~/.bashrc' ''
+  read -rp 'Enter your API key (or press Enter to use environment variable): ' api_key
 
-  # Create config file
-  cat > "$config_file" <<'EOF'
-# openxchg configuration file
-# See: openxchg --help for details
+  # Create config file in temp location
+  local -- temp_config="/tmp/openxchg-config-$$"
+  cat > "$temp_config" <<'EOF'
+# openxchg system configuration
+# All users share these settings
+# Edit with: sudo editor /etc/openxchg/config
 
 [General]
-# Default base currency (default: IDR)
 DEFAULT_BASE_CURRENCY=IDR
-
-# Verbose output by default (0=quiet, 1=verbose)
 DEFAULT_VERBOSE=1
-
-# Default date for queries (yesterday, today, or YYYY-MM-DD)
 DEFAULT_DATE=yesterday
-
-# Auto-update currency list from API (true/false)
 AUTO_UPDATE_CURRENCY_LIST=true
-
-# Which currencies to update (ALL, CONFIGURED, or path to file)
-UPDATE_CURRENCIES=ALL
+UPDATE_CURRENCIES=/etc/openxchg/update-currencies.list
 
 [API]
-# OpenExchangeRates.org API key
-# WARNING: Storing API key in config file is less secure than using
-# environment variable OPENEXCHANGE_API_KEY
+# RECOMMENDED: Use environment variable instead
+#   export OPENEXCHANGE_API_KEY='your_key'
+#   Add to ~/.bashrc for persistence
+# Precedence: CLI option (-a) > Environment > This file
 EOF
   if [[ -n "$api_key" ]]; then
-    echo "API_KEY=${api_key}" >> "$config_file"
+    echo "API_KEY=${api_key}" >> "$temp_config"
   else
-    echo "# API_KEY=your_api_key_here" >> "$config_file"
+    echo "API_KEY=" >> "$temp_config"
   fi
 
-  cat >> "$config_file" <<'EOF'
+  cat >> "$temp_config" <<'EOF'
 
 [Database]
-# Database file location
-# Must be an absolute path (relative paths are not allowed)
-# Default: /var/lib/openxchg/xchg.db
 DB_PATH=/var/lib/openxchg/xchg.db
-
-# Usage examples:
-#   DB_PATH=/var/lib/openxchg/xchg.db           # System-wide location
-#   DB_PATH=~/.local/share/openxchg/xchg.db     # User-specific location
-#   DB_PATH=/ai/scripts/openxchg/xchg.db        # Script directory location
 EOF
 
-  chmod 600 "$config_file"
-  success "Configuration created ${config_file@Q}"
+  # Move config to final location
+  if ((need_sudo)); then
+    sudo mv "$temp_config" "$config_file"
+    sudo chmod 644 "$config_file"
+  else
+    mv "$temp_config" "$config_file"
+    chmod 644 "$config_file"
+  fi
+
+  success "System configuration created: $config_file"
+
+  # Create currency list file
+  local -- temp_list="/tmp/openxchg-currencies-$$"
+  cat > "$temp_list" <<'EOF'
+# openxchg - Currency Update List
+# One currency per line (3-letter ISO codes)
+
+# Major world currencies
+USD
+EUR
+GBP
+JPY
+CNY
+
+# Asia-Pacific
+IDR
+AUD
+SGD
+MYR
+THB
+
+# Add more currencies as needed
+# Run 'openxchg -U' to see full list of 169 supported currencies
+EOF
+
+  if ((need_sudo)); then
+    sudo mv "$temp_list" "$currency_list"
+    sudo chmod 644 "$currency_list"
+  else
+    mv "$temp_list" "$currency_list"
+    chmod 644 "$currency_list"
+  fi
+
+  success "Currency list created: $currency_list"
 
   # Create environment variable suggestion
   if [[ -z "$api_key" ]]; then
     echo
-    warn 'No API key configured. To set it later, either:'
-    print "  1. Edit ${config_file@Q}" \
-          "  2. Or set environment variable: export OPENEXCHANGE_API_KEY='your_key'"
+    info 'Remember to set your API key:'
+    print "  export OPENEXCHANGE_API_KEY='your_api_key_here'" \
+          "  echo \"export OPENEXCHANGE_API_KEY='your_key'\" >> ~/.bashrc"
   fi
 }
 

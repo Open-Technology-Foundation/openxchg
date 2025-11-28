@@ -1,0 +1,137 @@
+#!/bin/bash
+#shellcheck disable=SC2155,SC2034
+# Find date gaps in openxchg IDR table
+set -euo pipefail
+shopt -s inherit_errexit
+
+# Script metadata
+declare -r VERSION='1.0.0'
+declare -r SCRIPT_PATH=$(realpath -- "$0")
+declare -r SCRIPT_DIR=${SCRIPT_PATH%/*} SCRIPT_NAME=${SCRIPT_PATH##*/}
+
+# Global variables
+declare -i VERBOSE=1
+declare -- FROM_DATE='2010-01-01'
+declare -- CURRENCY='USD'
+declare -r SQLITE_DB='/var/lib/openxchg/xchg.db'
+
+# Statistics
+declare -i TOTAL_GAPS=0
+declare -i TOTAL_MISSING_DAYS=0
+
+# Color definitions
+if [[ -t 1 && -t 2 ]]; then
+  declare -r RED=$'\033[0;31m'
+  declare -r GREEN=$'\033[0;32m'
+  declare -r YELLOW=$'\033[0;33m'
+  declare -r CYAN=$'\033[0;36m'
+  declare -r NC=$'\033[0m'
+else
+  declare -r RED='' GREEN='' YELLOW='' CYAN='' NC=''
+fi
+
+# Messaging functions
+info()  { ((VERBOSE)) && >&2 echo "$SCRIPT_NAME ${CYAN}◉${NC} $*"; }
+warn()  { ((VERBOSE)) && >&2 echo "$SCRIPT_NAME ${YELLOW}▲${NC} $*"; }
+error() { >&2 echo "$SCRIPT_NAME ${RED}✗${NC} $*"; }
+
+die() {
+  local -i exit_code=${1:-1}
+  shift
+  (($#)) && error "$@"
+  exit "$exit_code"
+}
+
+noarg() { (($# > 1)) || die 2 "Option '$1' requires an argument"; }
+
+show_help() {
+  cat <<EOF
+$SCRIPT_NAME $VERSION - Find date gaps in openxchg IDR table
+
+Usage: $SCRIPT_NAME [OPTIONS]
+
+Options:
+  -f, --from DATE     Start from date (default: 2010-01-01)
+  -c, --currency CUR  Currency to check (default: USD)
+  -q, --quiet         Only show summary
+  -h, --help          Show this help message
+  -V, --version       Show version
+
+Examples:
+  $SCRIPT_NAME                    # Find gaps from 2010 for USD
+  $SCRIPT_NAME -f 2020-01-01      # Find gaps from 2020
+  $SCRIPT_NAME -c SGD             # Check SGD instead of USD
+
+Database: $SQLITE_DB
+EOF
+}
+
+find_gaps() {
+  local -- prev_date=''
+  local -- curr_date
+  local -i prev_epoch curr_epoch gap_days
+
+  info "Checking $CURRENCY dates from $FROM_DATE..."
+
+  # Get all dates for the currency
+  while IFS= read -r curr_date; do
+    if [[ -n "$prev_date" ]]; then
+      # Calculate gap between dates
+      prev_epoch=$(date -d "$prev_date" +%s)
+      curr_epoch=$(date -d "$curr_date" +%s)
+      gap_days=$(( (curr_epoch - prev_epoch) / 86400 ))
+
+      if ((gap_days > 1)); then
+        ((TOTAL_GAPS+=1))
+        ((TOTAL_MISSING_DAYS += gap_days - 1))
+
+        if ((VERBOSE)); then
+          # Show gap: start_date end_date num_days
+          local -- gap_start gap_end
+          gap_start=$(date -d "$prev_date + 1 day" +%Y-%m-%d)
+          gap_end=$(date -d "$curr_date - 1 day" +%Y-%m-%d)
+          echo "$gap_start $gap_end $((gap_days - 1))"
+        fi
+      fi
+    fi
+    prev_date="$curr_date"
+  done < <(sqlite3 "$SQLITE_DB" \
+    "SELECT DISTINCT Date FROM IDR WHERE Currency='$CURRENCY' AND Date >= '$FROM_DATE' ORDER BY Date")
+}
+
+show_summary() {
+  echo
+  if ((TOTAL_GAPS == 0)); then
+    info "${GREEN}No gaps found${NC}"
+  else
+    warn "Found $TOTAL_GAPS gap(s), $TOTAL_MISSING_DAYS missing day(s)"
+  fi
+}
+
+main() {
+  # Parse arguments
+  while (($#)); do
+    case $1 in
+      -f|--from)     noarg "$@"; shift; FROM_DATE="$1" ;;
+      -c|--currency) noarg "$@"; shift; CURRENCY="${1^^}" ;;
+      -q|--quiet)    VERBOSE=0 ;;
+      -h|--help)     show_help; exit 0 ;;
+      -V|--version)  echo "$SCRIPT_NAME $VERSION"; exit 0 ;;
+      -*)            die 22 "Unknown option: '$1'" ;;
+      *)             die 22 "Unexpected argument: '$1'" ;;
+    esac
+    shift
+  done
+
+  # Check database exists
+  [[ -f "$SQLITE_DB" ]] || die 1 "Database not found: $SQLITE_DB"
+
+  # Find gaps
+  find_gaps
+
+  # Show summary
+  show_summary
+}
+
+main "$@"
+#fin

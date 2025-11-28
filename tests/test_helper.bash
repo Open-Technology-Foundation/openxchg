@@ -24,32 +24,65 @@ export TEST_MOCKS="${OPENXCHG_ROOT}/tests/mocks"
 # Test environment variables
 export TEST_TEMP_DIR=""
 export TEST_DB_PATH=""
+export TEST_DB_DIR=""
 export TEST_CONFIG_DIR=""
 export TEST_CONFIG_FILE=""
+export TEST_CURRENCY_LIST=""
 export MOCK_API_ENABLED="false"
+
+# Save original paths
+declare -g ORIG_PATH="${PATH}"
+declare -g ORIG_HOME="${HOME:-}"
 
 #
 # setup_test_env - Create isolated test environment
 #
 # Creates temporary directories, test database, and config files for testing.
+# The test environment mimics the system-wide configuration structure:
+#   - /etc/openxchg/config -> TEST_TEMP_DIR/etc/openxchg/config
+#   - /var/lib/openxchg/   -> TEST_TEMP_DIR/var/lib/openxchg/
+#
 # Call this in setup() function of test files.
 #
 setup_test_env() {
   # Create temporary directory for this test
   TEST_TEMP_DIR="$(mktemp -d "/tmp/openxchg-test-${BATS_TEST_NUMBER:-0}-XXXXXX")"
 
-  # Set test-specific paths
-  TEST_DB_PATH="${TEST_TEMP_DIR}/test.db"
-  TEST_CONFIG_DIR="${TEST_TEMP_DIR}/.config/openxchg"
+  # Create mock system directory structure
+  TEST_CONFIG_DIR="${TEST_TEMP_DIR}/etc/openxchg"
   TEST_CONFIG_FILE="${TEST_CONFIG_DIR}/config"
+  TEST_CURRENCY_LIST="${TEST_CONFIG_DIR}/update-currencies.list"
+  TEST_DB_DIR="${TEST_TEMP_DIR}/var/lib/openxchg"
+  TEST_DB_PATH="${TEST_DB_DIR}/xchg.db"
 
-  # Create config directory
+  # Create directories
   mkdir -p "$TEST_CONFIG_DIR"
+  mkdir -p "$TEST_DB_DIR"
+  chmod 1777 "$TEST_DB_DIR"
 
-  # Export for openxchg script
-  export DB_PATH="$TEST_DB_PATH"
+  # Create a wrapper script that overrides the paths
+  cat > "${TEST_TEMP_DIR}/openxchg-wrapper" <<EOF
+#!/bin/bash
+# Test wrapper - overrides system paths for isolated testing
+export CONFIG_FILE="${TEST_CONFIG_FILE}"
+export CONFIG_DIR="${TEST_CONFIG_DIR}"
+export DB_PATH="${TEST_DB_PATH}"
+export CURRENCIES_FILE="${TEST_DB_DIR}/currencies.json"
+# Pass through mock API environment
+export MOCK_API_ENABLED="\${MOCK_API_ENABLED:-false}"
+export TEST_FIXTURES="${TEST_FIXTURES}"
+export TEST_MOCKS="${TEST_MOCKS}"
+# Add mock directory to PATH if mock is enabled
+if [[ "\$MOCK_API_ENABLED" == "true" ]]; then
+  export PATH="${TEST_MOCKS}:\$PATH"
+fi
+exec "${OPENXCHG_BIN}" "\$@"
+EOF
+  chmod +x "${TEST_TEMP_DIR}/openxchg-wrapper"
+
+  # Export for direct use
+  export TEST_OPENXCHG="${TEST_TEMP_DIR}/openxchg-wrapper"
   export HOME="$TEST_TEMP_DIR"
-  export XDG_CONFIG_HOME="${TEST_TEMP_DIR}/.config"
 }
 
 #
@@ -63,9 +96,13 @@ teardown_test_env() {
     rm -rf "$TEST_TEMP_DIR"
   fi
 
+  # Restore original values
+  export PATH="${ORIG_PATH}"
+  export HOME="${ORIG_HOME}"
+
   # Unset test-specific variables
-  unset TEST_TEMP_DIR TEST_DB_PATH TEST_CONFIG_DIR TEST_CONFIG_FILE
-  unset DB_PATH HOME XDG_CONFIG_HOME
+  unset TEST_TEMP_DIR TEST_DB_PATH TEST_DB_DIR TEST_CONFIG_DIR TEST_CONFIG_FILE
+  unset TEST_CURRENCY_LIST TEST_OPENXCHG
 }
 
 #
@@ -108,10 +145,10 @@ DEFAULT_BASE_CURRENCY=IDR
 DEFAULT_VERBOSE=1
 DEFAULT_DATE=yesterday
 AUTO_UPDATE_CURRENCY_LIST=false
-UPDATE_CURRENCIES=ALL
+UPDATE_CURRENCIES=${TEST_CURRENCY_LIST}
 
 [API]
-API_KEY=
+API_KEY=test_api_key_123
 
 [Database]
 DB_PATH=${TEST_DB_PATH}
@@ -120,7 +157,45 @@ DB_PATH=${TEST_DB_PATH}
 
   mkdir -p "$(dirname "$config_path")"
   echo "$content" > "$config_path"
-  chmod 600 "$config_path"
+  chmod 644 "$config_path"
+}
+
+#
+# create_test_currency_list - Create a test currency update list
+#
+# Arguments:
+#   $1 - Currency list file path (defaults to TEST_CURRENCY_LIST)
+#   $2 - Content (optional, uses default if not provided)
+#
+create_test_currency_list() {
+  local -- list_path="${1:-$TEST_CURRENCY_LIST}"
+  local -- content="${2:-}"
+
+  if [[ -z "$content" ]]; then
+    # Create default currency list
+    content="# Test currency list
+USD
+EUR
+GBP
+JPY
+CNY
+IDR
+AUD
+SGD
+"
+  fi
+
+  mkdir -p "$(dirname "$list_path")"
+  echo "$content" > "$list_path"
+  chmod 644 "$list_path"
+}
+
+#
+# create_full_test_env - Create config file and currency list together
+#
+create_full_test_env() {
+  create_test_config
+  create_test_currency_list
 }
 
 #
@@ -281,6 +356,15 @@ assert_json_valid() {
 # Sets $status and $output variables like 'run' command
 #
 run_openxchg() {
+  run "$TEST_OPENXCHG" "$@"
+}
+
+#
+# run_openxchg_raw - Run openxchg directly (without wrapper)
+#
+# Use this for tests that need to test auto-initialization
+#
+run_openxchg_raw() {
   run "$OPENXCHG_BIN" "$@"
 }
 
