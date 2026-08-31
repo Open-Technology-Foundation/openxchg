@@ -17,7 +17,12 @@ declare -r VERSION='2.0.0'
 declare -r SCRIPT_PATH=$(realpath -e -- "$0")
 declare -r SCRIPT_NAME=${SCRIPT_PATH##*/}
 
+# Snapshot env before defaults apply: config files must not override
+# values the caller set explicitly in the environment
+declare -r ENV_API_KEY=${OPENEXCHANGE_API_KEY:-} ENV_DB_PATH=${DB_PATH:-}
+
 declare -- DB_PATH=${DB_PATH:-/var/lib/openxchg/xchg.db}
+declare -- DEFAULT_BASE=IDR
 declare -r HISTORICAL_URL='https://openexchangerates.org/api/historical/'
 declare -r LATEST_URL='https://openexchangerates.org/api/latest.json'
 declare -- OPENEXCHANGE_API_KEY=${OPENEXCHANGE_API_KEY:-'2a9989da6985438481f9a5f3801d84d1'}
@@ -91,12 +96,34 @@ Environment:
   OPENEXCHANGE_API_KEY   API key (get one free: openexchangerates.org/signup)
   DB_PATH                Database file (default: /var/lib/openxchg/xchg.db)
 
+Configuration (optional):
+  Plain Bash assignments sourced from, in order:
+    /etc/openxchg.conf
+    \${XDG_CONFIG_HOME:-~/.config}/openxchg.conf
+  Recognised: DEFAULT_BASE, DB_PATH, OPENEXCHANGE_API_KEY, VERBOSE
+  Precedence: CLI options > environment > user conf > system conf > defaults
+  Files are sourced as Bash: keep them root/user-owned, never world-writable.
+
 Database:
   Tables:  one per base currency (IDR, USD, EUR, ...)
   Columns: id, Date, Currency, Unit, Xchg, Updated
   Dates are UTC (End-of-Day rates for completed UTC days).
   Maintenance via sqlite3 directly: .schema, VACUUM, PRAGMA integrity_check.
 USAGE
+}
+
+# Optional config: plain Bash assignments, sourced in cascade order.
+# Recognised variables: DEFAULT_BASE, DB_PATH, OPENEXCHANGE_API_KEY, VERBOSE.
+# Precedence: CLI options > environment > user conf > system conf > defaults.
+read_conf() {
+  local -- conf
+  for conf in /etc/openxchg.conf "${XDG_CONFIG_HOME:-${HOME:-}/.config}"/openxchg.conf; do
+    [[ -f $conf && -r $conf ]] || continue
+    #shellcheck source=/dev/null
+    source "$conf" || die 19 "Failed to load config ${conf@Q}"
+  done
+  [[ -z $ENV_API_KEY ]] || OPENEXCHANGE_API_KEY=$ENV_API_KEY
+  [[ -z $ENV_DB_PATH ]] || DB_PATH=$ENV_DB_PATH
 }
 
 # Map common aliases to ISO codes; uppercase everything else
@@ -251,6 +278,8 @@ main() {
   local -- dte=''
   local -a args=()
 
+  read_conf
+
   while (($#)); do case $1 in
     -d|--date)    noarg "$@"; shift
                   dte=$(TZ=UTC date +%F -d "$1" 2>/dev/null) || die 22 "Invalid date ${1@Q}" ;;
@@ -279,10 +308,14 @@ main() {
     validate_currency "${args[i]}"
   done
 
-  local -- base=IDR
+  local -- base
   if ((${#args[@]})); then
     base=${args[0]}
     args=("${args[@]:1}")
+  else
+    # Config may set DEFAULT_BASE; validate it like any other operand
+    base=$(normalize_currency "$DEFAULT_BASE")
+    validate_currency "$base"
   fi
 
   TMPFILE=$(mktemp) || die 1 'Failed to create temp file'

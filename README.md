@@ -66,12 +66,14 @@ sudo cp openxchg /usr/local/bin/
 
 ## Configuration
 
-Configuration is by environment variable and command-line option only — no config files.
+Environment variables cover the common cases; an optional config file adds persistence (useful for cron, which has no user environment).
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `OPENEXCHANGE_API_KEY` | — | API key (or use `-a KEY` per invocation) |
 | `DB_PATH` | `/var/lib/openxchg/xchg.db` | SQLite database file |
+| `DEFAULT_BASE` | `IDR` | Base currency when none given (config file only) |
+| `VERBOSE` | `1` | Default verbosity (config file only) |
 
 ```bash
 # Permanent API key (add to ~/.bashrc)
@@ -81,7 +83,22 @@ echo "export OPENEXCHANGE_API_KEY='your_api_key_here'" >> ~/.bashrc
 DB_PATH=~/xchg.db openxchg idr usd eur
 ```
 
-Precedence: CLI options > environment variables > built-in defaults.
+### Optional Config File
+
+Plain Bash assignments, sourced from (later overrides earlier):
+
+1. `/etc/openxchg.conf` — system-wide
+2. `${XDG_CONFIG_HOME:-~/.config}/openxchg.conf` — per-user
+
+```bash
+# /etc/openxchg.conf
+DEFAULT_BASE=IDR
+OPENEXCHANGE_API_KEY='your_api_key_here'
+```
+
+Precedence: CLI options > environment variables > user conf > system conf > built-in defaults.
+
+▲ Config files are **sourced as Bash** — keep them owned by root (system) or the user (personal) and never world-writable. `chmod 600` any file containing an API key.
 
 ## Basic Usage
 
@@ -246,7 +263,7 @@ AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND BOB BRL 
 
 ## Testing
 
-BATS test suite, 26 tests, fully offline (mock `wget` + scratch databases):
+BATS test suite, 31 tests, fully offline (mock `wget` + scratch databases + isolated config):
 
 ```bash
 ./scripts/run_tests.sh

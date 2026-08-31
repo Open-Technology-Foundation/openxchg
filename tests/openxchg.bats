@@ -175,6 +175,47 @@ teardown() { teardown_test_env; }
   [[ ! -f $DB_PATH ]]
 }
 
+# --- optional config file ---
+
+@test "config file sets default base currency" {
+  echo 'DEFAULT_BASE=eur' > "$XDG_CONFIG_HOME/openxchg.conf"
+  run "$OPENXCHG_BIN" -q
+  assert_success
+  run sqlite3 "$DB_PATH" "SELECT count(*) FROM EUR"
+  refute_output '0'
+}
+
+@test "config file sets DB_PATH when env does not" {
+  local conf_db="$TEST_TEMP_DIR/conf.db"
+  echo "DB_PATH=$conf_db" > "$XDG_CONFIG_HOME/openxchg.conf"
+  env -u DB_PATH "$OPENXCHG_BIN" -q idr
+  [[ -f $conf_db ]]
+}
+
+@test "environment DB_PATH overrides config file" {
+  echo "DB_PATH=$TEST_TEMP_DIR/conf.db" > "$XDG_CONFIG_HOME/openxchg.conf"
+  run "$OPENXCHG_BIN" -q idr
+  assert_success
+  [[ -f $DB_PATH ]]
+  [[ ! -f $TEST_TEMP_DIR/conf.db ]]
+}
+
+@test "invalid DEFAULT_BASE in config is rejected" {
+  echo 'DEFAULT_BASE=xxx' > "$XDG_CONFIG_HOME/openxchg.conf"
+  run "$OPENXCHG_BIN" -q
+  assert_failure 22
+}
+
+@test "config VERBOSE=0 silences update, CLI -v overrides" {
+  echo 'VERBOSE=0' > "$XDG_CONFIG_HOME/openxchg.conf"
+  run "$OPENXCHG_BIN" idr
+  assert_success
+  assert_output ''
+  run "$OPENXCHG_BIN" -v idr
+  assert_success
+  assert_output --partial 'Update complete'
+}
+
 # --- option ergonomics ---
 
 @test "bundled short options work" {

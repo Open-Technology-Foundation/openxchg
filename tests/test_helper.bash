@@ -18,7 +18,9 @@ setup_test_env() {
   export MOCK_FIXTURES="${TEST_TEMP_DIR}/fixtures"
   export MOCK_API_ENABLED=true
   export MOCK_API_ERROR=0
-  mkdir -p "$MOCK_FIXTURES"
+  # Isolate user config so a real ~/.config/openxchg.conf cannot leak in
+  export XDG_CONFIG_HOME="${TEST_TEMP_DIR}/xdg"
+  mkdir -p "$MOCK_FIXTURES" "$XDG_CONFIG_HOME"
   write_fixtures
   export PATH="${OPENXCHG_ROOT}/tests/mocks:${PATH}"
 }
