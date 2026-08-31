@@ -1,85 +1,39 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# wget - mock for openxchg tests
 #
-# wget - Mock wget for API testing
-#
-# This script intercepts wget calls during testing and returns fixture data
-# instead of making real API calls. It simulates the OpenExchangeRates API.
-#
-# Usage: Automatically used when MOCK_API_ENABLED=true in test environment
-
+# Serves JSON fixtures from $MOCK_FIXTURES when MOCK_API_ENABLED=true;
+# otherwise execs the real wget. MOCK_API_ERROR=1 forces the API-error
+# fixture regardless of endpoint.
 set -euo pipefail
+shopt -s inherit_errexit
 
-# Get the real wget path
-declare -r REAL_WGET="$(command -v wget | grep -v "tests/mocks" | head -1)"
-
-# Check if mocking is enabled
-if [[ "${MOCK_API_ENABLED:-false}" != "true" ]]; then
-  # Not in mock mode, use real wget
-  exec "$REAL_WGET" "$@"
+if [[ ${MOCK_API_ENABLED:-false} != true ]]; then
+  exec /usr/bin/wget "$@"
 fi
 
-# Parse wget arguments
-declare -- output_file=""
-declare -- url=""
-declare -i i=0
-
-while ((i < $#)); do
-  i+=1
-  case "${!i}" in
-    -O)
-      i+=1
-      output_file="${!i}"
-      ;;
-    -q|--quiet)
-      # Ignore quiet flag
-      ;;
-    *)
-      # Assume it's the URL
-      url="${!i}"
-      ;;
+declare -- out='' url=''
+while (($#)); do
+  case $1 in
+    -O|-qO) shift; out=$1 ;;
+    -*)     ;;
+    *)      url=$1 ;;
   esac
+  shift
 done
 
-# Determine which fixture to return based on URL
-declare -- fixture_file=""
-
-if [[ "$url" =~ currencies\.json ]]; then
-  # Currency list endpoint
-  fixture_file="${TEST_FIXTURES}/api_responses/currencies.json"
-
-elif [[ "$url" =~ /latest\.json ]]; then
-  # Latest rates endpoint
-  fixture_file="${TEST_FIXTURES}/api_responses/latest.json"
-
-elif [[ "$url" =~ /historical/?/?([0-9]{4}-[0-9]{2}-[0-9]{2})\.json ]]; then
-  # Historical endpoint (handles both /historical/DATE and /historical//DATE)
-  declare -- date="${BASH_REMATCH[1]}"
-  fixture_file="${TEST_FIXTURES}/api_responses/historical_${date}.json"
-
-  # If specific date not found, use generic historical
-  if [[ ! -f "$fixture_file" ]]; then
-    fixture_file="${TEST_FIXTURES}/api_responses/historical.json"
-  fi
-
+declare -- fixture=''
+if ((${MOCK_API_ERROR:-0})); then
+  fixture="$MOCK_FIXTURES/error.json"
+elif [[ $url == */latest.json* ]]; then
+  fixture="$MOCK_FIXTURES/latest.json"
+elif [[ $url == */historical/* ]]; then
+  fixture="$MOCK_FIXTURES/historical.json"
 else
-  # Unknown endpoint, return error
-  echo "Mock wget: Unknown API endpoint: $url" >&2
+  >&2 echo "mock wget: unknown endpoint: $url"
   exit 1
 fi
 
-# Check if fixture exists
-if [[ ! -f "$fixture_file" ]]; then
-  echo "Mock wget: Fixture not found: $fixture_file" >&2
-  exit 1
-fi
-
-# Return fixture data
-if [[ -n "$output_file" ]]; then
-  cp "$fixture_file" "$output_file"
-else
-  cat "$fixture_file"
-fi
-
-exit 0
-
+[[ -f $fixture ]] || { >&2 echo "mock wget: missing fixture ${fixture@Q}"; exit 1; }
+[[ -n $out ]] || { >&2 echo 'mock wget: no -O output file given'; exit 1; }
+cp -- "$fixture" "$out"
 #fin

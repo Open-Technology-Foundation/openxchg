@@ -1,1021 +1,131 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # openxchg - Multi-currency exchange rate database manager
 #
-# Fetches exchange rates from openexchangerates.org API and stores them in
-# a SQLite database. Supports multiple base currencies with separate tables
-# for each. Currency codes are case-insensitive. Options can appear anywhere
-# in the command line (GNU-style argument parsing).
+# Fetches exchange rates from openexchangerates.org and stores them in a
+# SQLite database, one table per base currency. Currency codes are
+# case-insensitive; options can appear anywhere on the command line.
 #
-# Database: xchg.db (SQLite)
-# Tables: One table per base currency (e.g., IDR, USD, EUR, GBP)
-# Supported: 169 currencies from OpenExchange API
-
+# Modes:
+#   UPDATE - no currency codes given: fetch all rates for a date and store
+#   QUERY  - currency codes given: display stored rates
+#   LATEST - with -l: fetch and display current rates (not stored)
 set -euo pipefail
-shopt -s inherit_errexit extglob nullglob
+shopt -s inherit_errexit
 
-declare -r VERSION='1.0.0'
+declare -r VERSION='2.0.0'
 #shellcheck disable=SC2155
 declare -r SCRIPT_PATH=$(realpath -e -- "$0")
 declare -r SCRIPT_NAME=${SCRIPT_PATH##*/}
 
-# Configuration file settings
-declare -r CONFIG_FILE="${CONFIG_FILE:-/etc/openxchg/config}"
-declare -r CONFIG_DIR="${CONFIG_DIR:-/etc/openxchg}"
-declare -r CURRENCIES_FILE="${CURRENCIES_FILE:-/var/lib/openxchg/currencies.json}"
-declare -- CONFIG_DEFAULT_BASE_CURRENCY=''
-declare -- CONFIG_DEFAULT_VERBOSE=''
-declare -- CONFIG_DEFAULT_DATE=''
-declare -- CONFIG_API_KEY=''
-declare -- CONFIG_DB_PATH=''
-declare -- CONFIG_AUTO_UPDATE_CURRENCY_LIST=''
-declare -- CONFIG_UPDATE_CURRENCIES=''
-
-declare -- DB_PATH="${DB_PATH:-/var/lib/openxchg/xchg.db}"
-
-declare -r OPENEXCHANGE_HISTORICAL_URL='https://openexchangerates.org/api/historical/'
-declare -r OPENEXCHANGE_LATEST_URL='https://openexchangerates.org/api/latest.json'
+declare -- DB_PATH=${DB_PATH:-/var/lib/openxchg/xchg.db}
+declare -r HISTORICAL_URL='https://openexchangerates.org/api/historical/'
+declare -r LATEST_URL='https://openexchangerates.org/api/latest.json'
 declare -- OPENEXCHANGE_API_KEY=${OPENEXCHANGE_API_KEY:-'2a9989da6985438481f9a5f3801d84d1'}
 
-declare -a MU=( AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND BOB BRL BSD BTC BTN BWP BYN BZD CAD CDF CHF CLF CLP CNH CNY COP CRC CUC CUP CVE CZK DJF DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GGP GHS GIP GMD GNF GTQ GYD HKD HNL HRK HTG HUF IDR ILS IMP INR IQD IRR ISK JEP JMD JOD JPY KES KGS KHR KMF KPW KRW KWD KYD KZT LAK LBP LKR LRD LSL LYD MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD OMR PAB PEN PGK PHP PKR PLN PYG QAR RON RSD RUB RWF SAR SBD SCR SDG SEK SGD SHP SLL SOS SRD SSP STD STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD TWD TZS UAH UGX USD UYU UZS VND VUV WST XAF XAG XAU XCD XDR XOF XPD XPF XPT YER ZAR ZMW ZWL )
+# Supported currencies (openexchangerates.org)
+declare -ra MU=( AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND BOB BRL BSD BTC BTN BWP BYN BZD CAD CDF CHF CLF CLP CNH CNY COP CRC CUC CUP CVE CZK DJF DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GGP GHS GIP GMD GNF GTQ GYD HKD HNL HRK HTG HUF IDR ILS IMP INR IQD IRR ISK JEP JMD JOD JPY KES KGS KHR KMF KPW KRW KWD KYD KZT LAK LBP LKR LRD LSL LYD MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD OMR PAB PEN PGK PHP PKR PLN PYG QAR RON RSD RUB RWF SAR SBD SCR SDG SEK SGD SHP SLL SOS SRD SSP STD STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD TWD TZS UAH UGX USD UYU UZS VND VUV WST XAF XAG XAU XCD XDR XOF XPD XPF XPT YER ZAR ZMW ZWL )
 
-declare -r TMPFILE=/tmp/"$SCRIPT_NAME"-"$$"-"$RANDOM"
+# Cross rates for one fetch: XRATES[CODE] = base_rate / code_rate
+declare -A XRATES=()
 
-declare -i VERBOSE=1
-declare -i LATEST_MODE=0
-declare -i UPDATE_ALL_CURRENCIES=0
+declare -i VERBOSE=1 LATEST_MODE=0
+declare -- TMPFILE=''
 
-trap '{ cleanup $?; }' SIGINT SIGTERM EXIT
-
-# Color definitions
 if [[ -t 1 && -t 2 ]]; then
-  declare -r RED=$'\033[0;31m' GREEN=$'\033[0;32m' YELLOW=$'\033[0;33m' NC=$'\033[0m'
+  declare -r RED=$'\033[0;31m' YELLOW=$'\033[0;33m' NC=$'\033[0m'
 else
-  declare -r RED='' GREEN='' YELLOW='' NC=''
+  declare -r RED='' YELLOW='' NC=''
 fi
 
-# Utility functions
-_msg() {
-  local -- status="${FUNCNAME[1]}" prefix="$SCRIPT_NAME:" msg
-  case "$status" in
-    info)    : ;; #prefix+=" ${CYAN}◉${NC}" ;;
-    warn)    prefix+=" ${YELLOW}▲${NC}" ;;
-    success) prefix+=" ${GREEN}✓${NC}" ;;
-    error)   prefix+=" ${RED}✗${NC}" ;;
+# Messaging
+#shellcheck disable=SC2059
+_msg() { >&2 printf "$SCRIPT_NAME: $1 %s\n" "${@:2}"; }
+error() { _msg "$RED✗$NC" "$@"; }
+die() { (($# < 2)) || error "${@:2}"; exit "${1:-0}"; }
+warn() { _msg "$YELLOW▲$NC" "$@"; }
+info() { ((VERBOSE)) || return 0; _msg '◉' "$@"; }
+
+noarg() { (($# > 1)) || die 22 "Option ${1@Q} requires an argument"; }
+
+cleanup() {
+  local -i exitcode=${1:-$?}
+  trap - SIGINT SIGTERM EXIT
+  [[ -z $TMPFILE ]] || rm -f -- "$TMPFILE"
+  exit "$exitcode"
+}
+trap 'cleanup $?' SIGINT SIGTERM EXIT
+
+usage() {
+  cat <<USAGE
+$SCRIPT_NAME $VERSION - Multi-currency exchange rate database manager
+
+Fetches exchange rates from openexchangerates.org and stores them in SQLite,
+one table per base currency. ${#MU[@]} currencies supported. Currency codes are
+case-insensitive; options can appear anywhere on the command line.
+
+Usage: $SCRIPT_NAME [OPTIONS] [base_currency] [CurrencyCode ...]
+
+Options:
+  -d, --date DATE     Date for query/update (default: yesterday UTC)
+  -a, --apikey KEY    API key (overrides OPENEXCHANGE_API_KEY env)
+  -l, --latest        Fetch current real-time rates (display only, not stored)
+  -q, --quiet         Suppress informational output
+  -v, --verbose       Verbose output (default)
+  -V, --version       Show version
+  -h, --help          Show this help
+
+Modes:
+  UPDATE: no currency codes - fetch all rates for the date and store them
+  QUERY:  currency codes given - display stored rates from the database
+  LATEST: with -l - fetch and display current rates (not stored)
+
+Examples:
+  $SCRIPT_NAME idr usd eur gbp        # query stored rates (IDR table)
+  $SCRIPT_NAME -d 2025-01-01 eur usd  # query specific date
+  $SCRIPT_NAME idr                    # update IDR table for yesterday
+  $SCRIPT_NAME -d 2025-01-01 usd      # update USD table for a date
+  $SCRIPT_NAME -l idr usd eur         # current real-time rates
+  $SCRIPT_NAME -q idr                 # quiet update (for cron)
+
+Environment:
+  OPENEXCHANGE_API_KEY   API key (get one free: openexchangerates.org/signup)
+  DB_PATH                Database file (default: /var/lib/openxchg/xchg.db)
+
+Database:
+  Tables:  one per base currency (IDR, USD, EUR, ...)
+  Columns: id, Date, Currency, Unit, Xchg, Updated
+  Dates are UTC (End-of-Day rates for completed UTC days).
+  Maintenance via sqlite3 directly: .schema, VACUUM, PRAGMA integrity_check.
+USAGE
+}
+
+# Map common aliases to ISO codes; uppercase everything else
+normalize_currency() {
+  local -- c=${1^^}
+  case $c in
+    RMB|RENMINBI|YUAN) c=CNY ;;
+    RUPIAH)            c=IDR ;;
+    YEN)               c=JPY ;;
+    STERLING|POUND)    c=GBP ;;
+    DOLLAR|GREENBACK)  c=USD ;;
+    FRANC|SWISSY)      c=CHF ;;
+    AUSSIE)            c=AUD ;;
+    KIWI)              c=NZD ;;
+    LOONIE)            c=CAD ;;
   esac
-  for msg in "$@"; do printf '%s %s\n' "$prefix" "$msg"; done
+  echo "$c"
 }
 
-info() { ((VERBOSE)) || return 0; >&2 _msg "$@"; }
-warn() { ((VERBOSE)) || return 0; >&2 _msg "$@"; }
-success() { ((VERBOSE)) || return 0; >&2 _msg "$@" || return 0; }
-error() { >&2 _msg "$@"; }
-die() { (($# > 1)) && error "${@:2}"; exit "${1:-0}"; }
-
-#
-# load_config - Load and parse INI-style configuration file
-#
-# Reads configuration from INI file with sections and key=value pairs.
-# Supports comments (# and ;) and blank lines. Permissive error handling:
-# warns on invalid lines but continues with defaults.
-#
-# Arguments:
-#   $1 - Path to config file
-#   $2 - (Optional) If "fallback", only set values that aren't already set
-#
-# Sets global variables:
-#   CONFIG_DEFAULT_BASE_CURRENCY
-#   CONFIG_DEFAULT_VERBOSE
-#   CONFIG_DEFAULT_DATE
-#   CONFIG_API_KEY
-#   CONFIG_DB_PATH
-#
-load_config() {
-  local -- config_file=$1
-  local -- section='' key value line
-
-  [[ -f "$config_file" ]] || return 0
-  [[ -r "$config_file" ]] || return 0  # Silently skip if not readable
-
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    # Remove leading/trailing whitespace
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-
-    # Skip empty lines and comments
-    [[ -n "$line" ]] || continue
-    [[ ! "$line" =~ ^[#\;] ]] || continue
-
-    # Section headers
-    if [[ "$line" =~ ^\[([^]]+)\]$ ]]; then
-      section="${BASH_REMATCH[1]}"
-      continue
-    fi
-
-    # Key=value pairs
-    if [[ "$line" =~ ^([^=]+)=(.*)$ ]]; then
-      key="${BASH_REMATCH[1]}"
-      value="${BASH_REMATCH[2]}"
-
-      # Trim whitespace from key and value
-      key="${key#"${key%%[![:space:]]*}"}"
-      key="${key%"${key##*[![:space:]]}"}"
-      value="${value#"${value%%[![:space:]]*}"}"
-      value="${value%"${value##*[![:space:]]}"}"
-
-      # Map to global config variables
-      case "$section:$key" in
-        General:DEFAULT_BASE_CURRENCY)
-          CONFIG_DEFAULT_BASE_CURRENCY="${value^^}"
-          ;;
-        General:DEFAULT_VERBOSE)
-          if [[ "$value" =~ ^[01]$ ]]; then
-            CONFIG_DEFAULT_VERBOSE="$value"
-          else
-            warn "Invalid DEFAULT_VERBOSE value ${value@Q} in config (must be 0 or 1), using default"
-          fi
-          ;;
-        General:DEFAULT_DATE)
-          CONFIG_DEFAULT_DATE="$value"
-          ;;
-        General:AUTO_UPDATE_CURRENCY_LIST)
-          if [[ "$value" =~ ^(true|false)$ ]]; then
-            CONFIG_AUTO_UPDATE_CURRENCY_LIST="$value"
-          else
-            warn "Invalid AUTO_UPDATE_CURRENCY_LIST value ${value@Q} in config (must be true or false), using default"
-          fi
-          ;;
-        General:UPDATE_CURRENCIES)
-          CONFIG_UPDATE_CURRENCIES="$value"
-          ;;
-        API:API_KEY)
-          CONFIG_API_KEY="$value"
-          ;;
-        Database:DB_PATH)
-          CONFIG_DB_PATH="$value"
-          ;;
-        *)
-          warn "Unknown config option ${section@Q}:${key@Q} in ${config_file@Q}"
-          ;;
-      esac
-    else
-      warn "Invalid config line in ${config_file@Q}: $line"
-    fi
-  done < "$config_file"
+validate_currency() {
+  local -- c=$1
+  [[ $c =~ ^[A-Z]{3}$ ]] || die 22 "Invalid currency code ${c@Q} (must be a 3-letter code)"
+  [[ " ${MU[*]} " == *" $c "* ]] || die 22 "Currency ${c@Q} not supported by API"
 }
 
-#
-# auto_initialize - Auto-create system config on first run
-#
-# Detects first run and creates /etc/openxchg/ with default config files.
-# Uses sudo if needed. Creates /var/lib/openxchg/ with sticky bit.
-# Idempotent: safe to call multiple times.
-#
-# Returns:
-#   0 on success or if already initialized
-#   1 on failure
-#
-auto_initialize() {
-  # Already initialized? Check both config AND currency list exist
-  local -r currency_list="$CONFIG_DIR/update-currencies.list"
-  [[ -f "$CONFIG_FILE" && -f "$currency_list" ]] && return 0
-
-  info "First run detected - initializing system configuration..."
-
-  # Determine if we need sudo
-  local -i need_sudo=0
-  if [[ ! -w /etc ]]; then
-    need_sudo=1
-    if ! command -v sudo &>/dev/null; then
-      die 1 \
-        "Cannot create /etc/openxchg/ (permission denied and sudo not available)" \
-        "" \
-        "Manual setup required:" \
-        "  1. sudo mkdir -p /etc/openxchg /var/lib/openxchg" \
-        "  2. sudo chmod 1777 /var/lib/openxchg" \
-        "  3. sudo openxchg --help  # Re-run to complete initialization"
-    fi
-  fi
-
-  # Create /etc/openxchg/ directory
-  if ((need_sudo)); then
-    info "Creating system configuration (requires sudo)..."
-    sudo mkdir -p "$CONFIG_DIR" || die 1 "Failed to create ${CONFIG_DIR@Q}"
-  else
-    mkdir -p "$CONFIG_DIR" || die 1 "Failed to create ${CONFIG_DIR@Q}"
-  fi
-
-  # Create config file (skip if exists)
-  if [[ ! -f "$CONFIG_FILE" ]]; then
-    local -- temp_config="/tmp/openxchg-config-$$"
-    cat > "$temp_config" <<'EOF'
-# openxchg system configuration
-# All users share these settings
-# Edit with: sudo editor /etc/openxchg/config
-
-[General]
-DEFAULT_BASE_CURRENCY=IDR
-DEFAULT_VERBOSE=1
-DEFAULT_DATE=yesterday
-AUTO_UPDATE_CURRENCY_LIST=true
-UPDATE_CURRENCIES=/etc/openxchg/update-currencies.list
-
-[API]
-# RECOMMENDED: Use environment variable instead
-#   export OPENEXCHANGE_API_KEY='your_key'
-#   Add to ~/.bashrc for persistence
-# Precedence: CLI option (-a) > Environment > This file
-API_KEY=
-
-[Database]
-DB_PATH=/var/lib/openxchg/xchg.db
-EOF
-
-    if ((need_sudo)); then
-      sudo mv "$temp_config" "$CONFIG_FILE" || die 1 "Failed to create config file"
-      sudo chmod 644 "$CONFIG_FILE"
-    else
-      mv "$temp_config" "$CONFIG_FILE" || die 1 "Failed to create config file"
-      chmod 644 "$CONFIG_FILE"
-    fi
-    success "Created ${CONFIG_FILE@Q}"
-  fi
-
-  # Create currency list file (skip if exists)
-  if [[ ! -f "$currency_list" ]]; then
-    local -- temp_list=/tmp/openxchg-currencies-"$$"
-    cat > "$temp_list" <<'EOF'
-# openxchg - Currency Update List
-# One currency per line (3-letter ISO codes)
-
-# Major world currencies
-USD
-EUR
-GBP
-JPY
-CNY
-
-# Asia-Pacific
-IDR
-AUD
-SGD
-MYR
-THB
-
-# Add more currencies as needed
-# Run 'openxchg -U' to see full list of supported currencies
-EOF
-
-    if ((need_sudo)); then
-      sudo mv "$temp_list" "$currency_list" || die 1 "Failed to create currency list"
-      sudo chmod 644 "$currency_list"
-    else
-      mv "$temp_list" "$currency_list" || die 1 "Failed to create currency list"
-      chmod 644 "$currency_list"
-    fi
-    success "Created ${currency_list@Q}"
-  fi
-
-  # Create /var/lib/openxchg/ with sticky bit
-  if [[ ! -d /var/lib/openxchg ]]; then
-    if [[ -w /var/lib ]]; then
-      mkdir -p /var/lib/openxchg || die 1 "Failed to create /var/lib/openxchg"
-      chmod 1777 /var/lib/openxchg
-    elif command -v sudo &>/dev/null; then
-      sudo mkdir -p /var/lib/openxchg || die 1 "Failed to create /var/lib/openxchg"
-      sudo chmod 1777 /var/lib/openxchg
-    else
-      die 1 'Cannot create /var/lib/openxchg (permission denied)'
-    fi
-    success "Created '/var/lib/openxchg/' (world-writable with sticky bit)"
-  fi
-
-  # Display setup instructions
-  info 'System configuration initialized successfully!' \
-       '' \
-       "Configuration: /etc/openxchg/config" \
-       "Currency list: /etc/openxchg/update-currencies.list" \
-       "Database: /var/lib/openxchg/xchg.db" \
-       "" \
-       "NEXT STEPS:" \
-       "  1. Set your API key (required for updates):" \
-       "     export OPENEXCHANGE_API_KEY='your_api_key_here'" \
-       "     Add to ~/.bashrc to make permanent" \
-       "" \
-       "  2. Get a free API key at:" \
-       "     https://openexchangerates.org/signup/free" \
-       "" \
-       "  3. Test with: openxchg idr usd eur"
-
-  return 0
-}
-
-#
-# validate_config - Validate configuration file(s)
-#
-# Performs comprehensive validation of configuration files at multiple levels:
-#   1. Syntax validation - Proper INI format
-#   2. Value validation - Valid currency codes, paths, etc.
-#   3. Best practices - Security and performance warnings
-#   4. Dependency checks - Required commands and files
-#
-# Arguments:
-#   $1 - Config file path to validate
-#
-# Returns:
-#   0 if validation passed (warnings allowed)
-#   1 if validation failed (errors found)
-#
-validate_config() {
-  local -- config_file="${1:-$CONFIG_FILE}"
-  local -i errors=0 warnings=0 info=0
-  local -- section='' line key value
-  local -i line_num=0
-
-  info "Validating Configuration ${config_file@Q}" "========================================" ''
-
-  # Check if file exists
-  if [[ ! -f "$config_file" ]]; then
-    error "Config file not found ${config_file@Q}"
-    return 1
-  fi
-
-  # Check if file is readable
-  if [[ ! -r "$config_file" ]]; then
-    error "Config file not readable ${config_file@Q}"
-    return 1
-  fi
-
-  info "File: $config_file" \
-       "Size: $(stat -c%s "$config_file") bytes"
-
-  # 1. SYNTAX VALIDATION
-  info "1. Syntax Validation" "--------------------"
-
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line_num+=1
-
-    # Skip empty lines and comments
-    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-    [[ "$line" =~ ^[[:space:]]*[#\;] ]] && continue
-
-    # Check for section header
-    if [[ "$line" =~ ^\[([A-Za-z0-9_]+)\][[:space:]]*$ ]]; then
-      section="${BASH_REMATCH[1]}"
-
-      # Validate section name
-      case "$section" in
-        General|API|Database)
-          : # Valid section
-          ;;
-        *)
-          warn "Line $line_num: Unknown section [$section]"
-          warnings+=1
-          ;;
-      esac
-      continue
-    fi
-
-    # Check for key=value pair
-    if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
-      key="${BASH_REMATCH[1]}"
-      value="${BASH_REMATCH[2]}"
-
-      # Validate key format
-      if [[ ! "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
-        warn "Line $line_num: Key should be UPPERCASE_WITH_UNDERSCORES: ${key@Q}"
-        warnings+=1
-      fi
-
-      continue
-    fi
-
-    # Line doesn't match any valid format
-    error "Line $line_num: Invalid syntax: ${line:0:60}"
-    errors+=1
-  done < "$config_file"
-
-  if ((errors == 0 && warnings == 0)); then
-    success "Syntax validation passed"
-  elif ((errors)); then
-    error "Syntax validation failed: $errors error(s), $warnings warning(s)"
-  else
-    success "Syntax validation passed with $warnings warning(s)"
-  fi
-
-  # 2. VALUE VALIDATION
-  info "2. Value Validation" "-------------------"
-
-  section=''
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    # Skip empty lines and comments
-    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-    [[ "$line" =~ ^[[:space:]]*[#\;] ]] && continue
-
-    # Track section
-    if [[ "$line" =~ ^\[([A-Za-z0-9_]+)\] ]]; then
-      section="${BASH_REMATCH[1]}"
-      continue
-    fi
-
-    # Parse key=value
-    if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
-      key="${BASH_REMATCH[1]}"
-      value="${BASH_REMATCH[2]}"
-
-      case "$section:$key" in
-        General:DEFAULT_BASE_CURRENCY)
-          if [[ -n "$value" ]]; then
-            value="${value^^}"
-            if [[ ! "$value" =~ ^[A-Z]{3}$ ]]; then
-              error "DEFAULT_BASE_CURRENCY must be 3-letter code: $value"
-              errors+=1
-            elif [[ ! " ${MU[*]} " =~ " $value " ]]; then
-              error "DEFAULT_BASE_CURRENCY not supported: $value"
-              errors+=1
-            else
-              success "DEFAULT_BASE_CURRENCY: $value (valid)"
-              info+=1
-            fi
-          fi
-          ;;
-        General:DEFAULT_VERBOSE)
-          if [[ -n "$value" ]] && [[ ! "$value" =~ ^[01]$ ]]; then
-            error "DEFAULT_VERBOSE must be 0 or 1: $value"
-            errors+=1
-          elif [[ -n "$value" ]]; then
-            success "DEFAULT_VERBOSE: $value (valid)"
-            info+=1
-          fi
-          ;;
-        General:DEFAULT_DATE)
-          if [[ -n "$value" ]]; then
-            case "$value" in
-              yesterday|today)
-                success "DEFAULT_DATE: $value (valid)"
-                info+=1
-                ;;
-              *)
-                # Try to parse as date
-                if TZ=UTC date +%F -d "$value" &>/dev/null; then
-                  success "DEFAULT_DATE: $value (valid date format)"
-                  info+=1
-                else
-                  error "DEFAULT_DATE invalid: $value (use 'yesterday', 'today', or YYYY-MM-DD)"
-                  errors+=1
-                fi
-                ;;
-            esac
-          fi
-          ;;
-        General:AUTO_UPDATE_CURRENCY_LIST)
-          if [[ -n "$value" ]]; then
-            value="${value,,}"
-            if [[ ! "$value" =~ ^(true|false)$ ]]; then
-              error "AUTO_UPDATE_CURRENCY_LIST must be 'true' or 'false': $value"
-              errors+=1
-            else
-              success "AUTO_UPDATE_CURRENCY_LIST: $value (valid)"
-              info+=1
-            fi
-          fi
-          ;;
-        General:UPDATE_CURRENCIES)
-          if [[ -n "$value" ]]; then
-            case "$value" in
-              ALL|CONFIGURED)
-                success "UPDATE_CURRENCIES: $value (valid)"
-                info+=1
-                ;;
-              /*)
-                if [[ ! -f "$value" ]]; then
-                  warn "UPDATE_CURRENCIES file not found: $value"
-                  warnings+=1
-                else
-                  success "UPDATE_CURRENCIES: $value (file exists)"
-                  info+=1
-                fi
-                ;;
-              *)
-                error "UPDATE_CURRENCIES must be 'ALL', 'CONFIGURED', or absolute path: $value"
-                errors+=1
-                ;;
-            esac
-          fi
-          ;;
-        Database:DB_PATH)
-          if [[ -n "$value" ]]; then
-            # Check if path is absolute or relative
-            if [[ "$value" =~ ^/ ]]; then
-              # Absolute path - check if parent directory exists
-              local -- parent_dir
-              parent_dir=$(dirname "$value")
-              if [[ ! -d "$parent_dir" ]]; then
-                warn "DB_PATH parent directory does not exist ${parent_dir@Q}"
-                warnings+=1
-              else
-                success "DB_PATH: $value (parent directory exists)"
-                info+=1
-              fi
-            else
-              # Relative path is ok (relative to script directory)
-              success "DB_PATH: $value (relative path)"
-              info+=1
-            fi
-          fi
-          ;;
-        API:API_KEY)
-          # Don't validate the actual key value, just check if set
-          if [[ -n "$value" ]]; then
-            info "API_KEY: Set in config (****${value: -4})"
-            info+=1
-          fi
-          ;;
-      esac
-    fi
-  done < "$config_file"
-
-  if ((errors)); then
-    error "Value validation failed: $errors error(s)"
-  else
-    success "Value validation passed"
-  fi
-
-  # 3. BEST PRACTICES
-  info "3. Best Practices" "-----------------"
-
-  # Check file permissions
-  local -- perms
-  perms=$(stat -c%a "$config_file")
-  if [[ "$perms" != "600" ]] && [[ "$perms" != "400" ]]; then
-    # Check if API key is set in file
-    if grep -q '^[[:space:]]*API_KEY=.' "$config_file"; then
-      warn "Config contains API_KEY but is not mode 600/400 (current ${perms@Q})"
-      info "  Recommendation: chmod 600 $config_file"
-      warnings+=1
-    else
-      info "File permissions: $perms (acceptable, no API key in file)"
-      info+=1
-    fi
-  else
-    success "File permissions: $perms (secure)"
-    info+=1
-  fi
-
-  # Check if API key is in environment instead of file
-  if grep -q '^[[:space:]]*API_KEY=[[:space:]]*$' "$config_file"; then
-    success "API_KEY not stored in config file (using environment variable recommended)"
-    info+=1
-  elif grep -q '^[[:space:]]*API_KEY=.' "$config_file"; then
-    info "API_KEY stored in config file (environment variable is more secure)"
-    info+=1
-  fi
-
-  # Check UPDATE_CURRENCIES setting for performance
-  if grep -q '^[[:space:]]*UPDATE_CURRENCIES=ALL' "$config_file"; then
-    info "UPDATE_CURRENCIES=ALL will update all currencies (consider selective list for faster updates)"
-    info+=1
-  fi
-
-  success "Best practices check completed"
-
-  # 4. DEPENDENCY CHECKS
-  info "4. Dependency Checks" "--------------------"
-
-  local -a required_commands=(sqlite3 wget jq bc date)
-  local -i missing=0
-
-  for cmd in "${required_commands[@]}"; do
-    if command -v "$cmd" &>/dev/null; then
-      success "$cmd: Available"
-    else
-      error "Required command not found: $cmd"
-      errors+=1
-      missing+=1
-    fi
-  done
-
-  if ((missing)); then
-    error "Dependency check failed: $missing missing command(s)"
-  else
-    success "All dependencies available"
-  fi
-
-  # SUMMARY
-  info "Summary" "-------" \
-       "Errors:   $errors" \
-       "Warnings: $warnings" \
-       "Info:     $info"
-
-  if ((errors)); then
-    error "VALIDATION FAILED"
-    return 1
-  elif ((warnings)); then
-    success "VALIDATION PASSED (with warnings)"
-    return 0
-  else
-    success "VALIDATION PASSED"
-    return 0
-  fi
-}
-
-#
-# show_config - Display current effective configuration
-#
-# Shows the effective configuration from all sources (CLI, config file, env, defaults)
-# with indication of which source each value comes from.
-#
-show_config() {
-  local -i saved_verbose=$VERBOSE
-
-  # Temporarily enable verbose for show_config regardless of user setting
-  VERBOSE=1
-
-  info "Current Configuration" "=====================" ""
-
-  info "Configuration File: ${CONFIG_FILE}"
-  if [[ -f "${CONFIG_FILE}" ]]; then
-    info "  Status: Found"
-  else
-    warn "  Status: Not found (will be auto-created on first run)"
-  fi
-
-  info "" "Settings:"
-  info "  DEFAULT_BASE_CURRENCY: ${CONFIG_DEFAULT_BASE_CURRENCY:-IDR}"
-  info "  DEFAULT_VERBOSE: ${CONFIG_DEFAULT_VERBOSE:-1}"
-  info "  DEFAULT_DATE: ${CONFIG_DEFAULT_DATE:-yesterday}"
-  info "  AUTO_UPDATE_CURRENCY_LIST: ${CONFIG_AUTO_UPDATE_CURRENCY_LIST:-true}"
-  info "  UPDATE_CURRENCIES: ${CONFIG_UPDATE_CURRENCIES:-ALL}"
-  info "  DB_PATH: ${CONFIG_DB_PATH:-/var/lib/openxchg/xchg.db}"
-
-  if [[ -n "${OPENEXCHANGE_API_KEY:-}" ]]; then
-    info "  API_KEY: ****${OPENEXCHANGE_API_KEY: -4} (environment variable)"
-  elif [[ -n "${CONFIG_API_KEY}" ]]; then
-    info "  API_KEY: ****${CONFIG_API_KEY: -4} (config file)"
-  else
-    warn "  API_KEY: Not set (set with: export OPENEXCHANGE_API_KEY='your_key')"
-  fi
-
-  info "" "Currency List: ${CURRENCIES_FILE}"
-  if [[ -f "${CURRENCIES_FILE}" ]]; then
-    local -i count
-    count=$(jq -r '.count // 0' "$CURRENCIES_FILE" 2>/dev/null || echo 0)
-    local -- last_updated
-    last_updated=$(jq -r '.last_updated // "unknown"' "$CURRENCIES_FILE" 2>/dev/null || echo "unknown")
-    info "  Status: Found ($count currencies)" \
-         "  Last Updated: $last_updated"
-  else
-    info "  Status: Not found" \
-         "  Run 'openxchg -U' to fetch from API"
-  fi
-
-  info "" "Precedence: CLI options > Environment > System config > Defaults"
-
-  # Restore previous verbose setting
-  VERBOSE=$saved_verbose
-}
-
-#
-# check_config_security - Check config file permissions for security issues
-#
-# Warns if config file is readable by group or world and contains an API key.
-# Non-blocking: displays warning but allows execution to continue.
-#
-# Arguments:
-#   $1 - Path to config file
-#
-#
-# fetch_currencies - Fetch and update currency list from API
-#
-# Downloads the latest currency list from OpenExchangeRates API and stores
-# it in currencies.json with metadata (timestamp, count, etc.)
-#
-fetch_currencies() {
-  local -- currencies_url='https://openexchangerates.org/api/currencies.json'
-  local -- temp_json="${TMPFILE}.currencies"
-
-  info "Fetching currency list from OpenExchangeRates API..."
-
-  # Fetch currencies from API (no API key required)
-  if ! wget -q -O "$temp_json" "$currencies_url"; then
-    error "Failed to fetch currency list from ${currencies_url@Q}"
-    return 1
-  fi
-
-  # Verify it's valid JSON
-  if ! jq empty "$temp_json" 2>/dev/null; then
-    error "Invalid JSON received from currency API"
-    rm -f "$temp_json"
-    return 1
-  fi
-
-  # Create database directory if needed (currencies.json goes in /var/lib now)
-  if [[ ! -d /var/lib/openxchg ]]; then
-    if [[ -w /var/lib ]]; then
-      mkdir -p /var/lib/openxchg
-      chmod 1777 /var/lib/openxchg
-    else
-      die 1 "Cannot create /var/lib/openxchg - run: sudo mkdir -p /var/lib/openxchg && sudo chmod 1777 /var/lib/openxchg"
-    fi
-  fi
-
-  # Build currencies.json with metadata
-  local -- timestamp
-  timestamp=$(TZ=UTC date -Iseconds)
-  local -i count
-  count=$(jq 'length' "$temp_json")
-
-  # Create currencies.json with metadata wrapper
-  jq -n \
-    --arg timestamp "$timestamp" \
-    --arg source "$currencies_url" \
-    --arg version "1.0" \
-    --argjson count "$count" \
-    --slurpfile currencies "$temp_json" \
-    '{
-      last_updated: $timestamp,
-      source: $source,
-      version: $version,
-      count: $count,
-      currencies: $currencies[0]
-    }' > "$CURRENCIES_FILE"
-
-  # Make world-writable so any user can update
-  chmod 666 "$CURRENCIES_FILE" 2>/dev/null || true
-
-  info "Currency list updated successfully" \
-       "  File: $CURRENCIES_FILE" \
-       "  Count: $count currencies" \
-       "  Updated: $timestamp"
-
-  rm -f "$temp_json"
-  return 0
-}
-
-#
-# normalize_currency_code - Normalize currency code with alias support
-#
-# Converts common currency aliases to official ISO codes and uppercases.
-# Supports hardcoded aliases for common currency names.
-#
-# Arguments:
-#   $1 - Currency code or alias (e.g., renminbi, yuan, RMB)
-#
-# Returns:
-#   Official 3-letter ISO currency code via stdout
-#
-normalize_currency_code() {
-  local -- input="${1^^}"  # Convert to uppercase
-
-  # Apply hardcoded aliases FIRST (case-insensitive matching done via ${1^^})
-  case "$input" in
-    # Chinese Yuan
-    RMB|RENMINBI|YUAN)
-      echo CNY
-      ;;
-    # Indonesian Rupiah
-    RUPIAH)
-      echo IDR
-      ;;
-    # Japanese Yen
-    YEN)
-      echo JPY
-      ;;
-    # British Pound
-    STERLING|POUND)
-      echo GBP
-      ;;
-    # US Dollar
-    DOLLAR|GREENBACK)
-      echo USD
-      ;;
-    # Swiss Franc
-    FRANC|SWISSY)
-      echo CHF
-      ;;
-    # Australian Dollar
-    AUSSIE)
-      echo AUD
-      ;;
-    # New Zealand Dollar
-    KIWI)
-      echo NZD
-      ;;
-    # Canadian Dollar
-    LOONIE)
-      echo CAD
-      ;;
-    *)
-      # Not a known alias, return as-is (will be validated elsewhere)
-      echo "$input"
-      ;;
-  esac
-}
-
-#
-# load_currencies - Load currency list from JSON file
-#
-# Loads currencies from currencies.json into MU array. Falls back to
-# hardcoded list if file doesn't exist or is invalid.
-#
-# Sets global variable:
-#   MU - Array of currency codes
-#
-load_currencies() {
-  # If currencies.json exists and is valid, load from it
-  if [[ -f "$CURRENCIES_FILE" ]] && jq empty "$CURRENCIES_FILE" 2>/dev/null; then
-    # Extract currency codes as array
-    local -- codes
-    codes=$(jq -r '.currencies | keys[]' "$CURRENCIES_FILE" 2>/dev/null | tr '\n' ' ')
-    if [[ -n "$codes" ]]; then
-      # shellcheck disable=SC2206
-      MU=($codes)
-      return 0
-    fi
-  fi
-  # Fallback to hardcoded list
-  info "Using hardcoded currency list (${#MU[@]} currencies)"
-  return 0
-}
-
-#
-# get_currency_name - Get full name for currency code
-#
-# Arguments:
-#   $1 - Currency code (e.g., USD)
-#
-# Returns:
-#   Currency name from currencies.json, or empty string if not found
-#
-get_currency_name() {
-  local -- code=$1
-
-  [[ -f "$CURRENCIES_FILE" ]] || return 0
-  jq -r --arg code "$code" '.currencies[$code] // ""' "$CURRENCIES_FILE" 2>/dev/null || echo ''
-}
-
-#
-# load_update_currency_list - Load currency codes from file
-#
-# Reads a file containing one currency code per line (comments and blank lines ignored).
-# Validates all currencies exist in the MU array. Fails with error if any invalid.
-#
-# Arguments:
-#   $1 - Path to currency list file
-#
-# Returns:
-#   Space-separated list of uppercase currency codes via stdout
-#
-load_update_currency_list() {
-  local -- list_file=$1
-  local -- line code
-  local -a codes=()
-
-  [[ -f "$list_file" ]] || die 1 "Currency list file not found: ${list_file@Q}"
-
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    # Remove leading/trailing whitespace
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-
-    # Skip empty lines and comments
-    [[ -n "$line" ]] || continue
-    [[ ! "$line" =~ ^# ]] || continue
-
-    # Extract currency code (first word, before any comment)
-    code="${line%%[[:space:]#]*}"
-    code=$(normalize_currency_code "$code")
-
-    # Validate it's a 3-letter code (after normalization)
-    [[ "$code" =~ ^[A-Z]{3}$ ]] || die 1 "Invalid currency code/alias ${line%%[[:space:]#]*@Q} in ${list_file@Q} (unknown currency)"
-
-    # Validate currency exists in MU array
-    [[ " ${MU[*]} " =~ " ${code} " ]] || die 1 "Currency ${code@Q} in ${list_file@Q} not supported by API (run 'openxchg -U' to update currency list)"
-
-    codes+=("$code")
-  done < "$list_file"
-
-  ((${#codes[@]} > 0)) || die 1 "No valid currencies found in ${list_file@Q}"
-
-  echo "${codes[*]}"
-}
-
-#
-# get_update_currency_list - Get list of currencies to update
-#
-# Determines which currencies to update based on UPDATE_CURRENCIES config
-# and --all flag. Returns space-separated list of currency codes.
-#
-# Globals:
-#   CONFIG_UPDATE_CURRENCIES - Config setting (ALL, CONFIGURED, or file path)
-#   UPDATE_ALL_CURRENCIES - Flag from --all option
-#   MU - Array of all supported currencies
-#
-# Returns:
-#   Space-separated list of currency codes via stdout
-#
-get_update_currency_list() {
-  local -- setting="${CONFIG_UPDATE_CURRENCIES:-ALL}"
-
-  # --all flag overrides config
-  if ((UPDATE_ALL_CURRENCIES)); then
-    info "Using --all flag: updating all ${#MU[@]} currencies"
-    echo "${MU[*]}"
-    return 0
-  fi
-
-  case "$setting" in
-    ALL)
-      echo "${MU[*]}"
-      ;;
-    CONFIGURED)
-      # Use currencies from currencies.json
-      if [[ -f "$CURRENCIES_FILE" ]]; then
-        local -- codes
-        codes=$(jq -r '.currencies | keys[]' "$CURRENCIES_FILE" 2>/dev/null | tr '\n' ' ')
-        if [[ -n "$codes" ]]; then
-          echo "$codes"
-        else
-          die 1 "UPDATE_CURRENCIES=CONFIGURED but no currencies found in ${CURRENCIES_FILE@Q}"
-        fi
-      else
-        die 1 "UPDATE_CURRENCIES=CONFIGURED but ${CURRENCIES_FILE@Q} not found (run 'openxchg -U' to create it)"
-      fi
-      ;;
-    /*)
-      # Absolute path to custom file
-      load_update_currency_list "$setting"
-      ;;
-    ~*)
-      # Home-relative path (expand tilde)
-      load_update_currency_list "${setting/#\~/$HOME}"
-      ;;
-    *)
-      # Relative path (relative to CONFIG_DIR)
-      load_update_currency_list "${CONFIG_DIR}/${setting}"
-      ;;
-  esac
-}
-
-#
-# check_auto_update_currencies - Auto-update currencies if needed
-#
-# Checks if currencies.json needs updating based on AUTO_UPDATE_CURRENCY_LIST
-# config and last update timestamp. Updates if last update was not today.
-#
-check_auto_update_currencies() {
-  # Skip if auto-update is disabled
-  [[ "${CONFIG_AUTO_UPDATE_CURRENCY_LIST}" == true ]] || return 0
-
-  # Skip if currencies file doesn't exist (will be created on first -U)
-  [[ -f "$CURRENCIES_FILE" ]] || return 0
-
-  # Get last update date
-  local -- last_update
-  last_update=$(jq -r '.last_updated // ""' "$CURRENCIES_FILE" 2>/dev/null)
-  [[ -n "$last_update" ]] || return 0
-
-  # Extract date portion (YYYY-MM-DD)
-  local -- last_date="${last_update:0:10}"
-  local -- today
-  today=$(TZ=UTC date +%F)
-
-  # Update if last update was not today
-  if [[ "$last_date" != "$today" ]]; then
-    info "Auto-updating currency list (last update: $last_date)..."
-    fetch_currencies
-  fi
-}
-
-#
-# ensure_table_exists - Create currency table if it doesn't exist
-#
-# Validates currency code format and API support, then creates a SQLite table
-# for the specified currency if it doesn't already exist. Each table stores
-# exchange rates with columns: id, Date, Currency, Unit, Xchg, Updated.
-#
-# Arguments:
-#   $1 - Currency code (must be 3 uppercase letters from MU array)
-#
-ensure_table_exists() {
-  local -- currency=${1^^}
-
-  # Validate currency code (3 uppercase letters)
-  [[ $currency =~ ^[A-Z]{3}$ ]] || die 1 "Invalid currency code: ${currency@Q} (must be 3 uppercase letters)"
-
-  # Validate currency is supported by API
-  [[ " ${MU[*]} " =~ " ${currency} " ]] || die 1 "Currency ${currency@Q} not supported by API (see MU array)"
-
-  # Check if table exists
-  local -i exists
-  exists=$(sqlite3 "$DB_PATH" \
-    "SELECT COUNT(*) FROM sqlite_master
-     WHERE type='table' AND name='$currency'" 2>/dev/null || echo 0)
-
-  if ((exists == 0)); then
-    # Create table with standard schema
-    info "Creating new table: $currency"
-    sqlite3 "$DB_PATH" <<EOF
-CREATE TABLE $currency (
+ensure_table() {
+  local -- t=$1
+  sqlite3 "$DB_PATH" <<SQL || die 1 "Cannot initialise table ${t@Q} in ${DB_PATH@Q}"
+CREATE TABLE IF NOT EXISTS $t (
   id INTEGER PRIMARY KEY,
   Date DATE NOT NULL,
   Currency TEXT NOT NULL DEFAULT 'USD',
@@ -1024,795 +134,166 @@ CREATE TABLE $currency (
   Updated TIMESTAMP NOT NULL,
   UNIQUE(Date, Currency)
 );
-CREATE INDEX idx_${currency}_currency ON $currency(Currency);
-CREATE INDEX idx_${currency}_updated ON $currency(Updated);
-EOF
-    info "Table $currency created successfully"
-  fi
+CREATE INDEX IF NOT EXISTS idx_${t}_currency ON $t(Currency);
+CREATE INDEX IF NOT EXISTS idx_${t}_updated ON $t(Updated);
+SQL
 }
 
-#
-# db_info - Display database statistics and information
-#
-# Shows comprehensive information about the database including:
-#   - Database file location, size, and modification time
-#   - List of all currency tables
-#   - Record counts per table
-#   - Date ranges for each table
-#   - Total records across all tables
-#
-# Returns:
-#   0 on success
-#   1 if database file not found
-#
-db_info() {
-  info "Database Information" \
-       "====================" \
-       ''
+# Fetch API JSON and populate XRATES with cross rates for $base.
+# jq does the base_rate/currency_rate division; only strictly-numeric
+# values survive the read loop, so XRATES is safe to embed in SQL.
+fetch_rates() {
+  local -- base=$1 url=$2
+  wget -qO "$TMPFILE" "$url" || die 1 'Failed to fetch rates from API'
+  jq empty "$TMPFILE" 2>/dev/null || die 1 'Invalid JSON received from API'
 
-  # Check if database exists
-  if [[ ! -f "$DB_PATH" ]]; then
-    error "Database file not found: $DB_PATH"
-    info "  Create database by running: openxchg <base_currency>"
-    return 1
+  local -- api_err
+  api_err=$(jq -r 'if .error == true then (.description // .message // "unknown") else empty end' "$TMPFILE")
+  [[ -z $api_err ]] || die 1 "API error: $api_err"
+
+  local -- key value
+  while IFS=$'\t' read -r key value; do
+    [[ $key =~ ^[A-Z]{3}$ ]] || continue
+    [[ $value =~ ^[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$ ]] || continue
+    XRATES[$key]=$value
+  done < <(jq -r --arg base "$base" '
+    (.rates // {}) as $r
+    | $r[$base] as $b
+    | if $b == null or $b == 0 then empty
+      else $r | to_entries[]
+           | select((.value | type) == "number" and .value != 0)
+           | "\(.key)\t\($b / .value)"
+      end' "$TMPFILE")
+
+  ((${#XRATES[@]})) || die 1 "Base currency ${base@Q} not found in API response"
+}
+
+query_rates() {
+  local -- base=$1 dte=$2
+  shift 2
+
+  local -i exists
+  exists=$(sqlite3 "$DB_PATH" \
+    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='$base'")
+  ((exists)) || die 3 "No ${base@Q} table in database (run '$SCRIPT_NAME ${base,,}' to populate)"
+
+  if ((VERBOSE)); then
+    printf '%-10s  %-14s  %s\n' 'Currency' 'Xchg' 'Date (UTC)'
+    printf '%-10s  %-14s  %s\n' '----------' '--------------' '----------'
   fi
 
-  # Basic file information
-  local -- db_size db_mtime
-  db_size=$(stat -c%s "$DB_PATH")
-  db_mtime=$(stat -c%y "$DB_PATH" | cut -d. -f1)
+  local -- code
+  for code in "$@"; do
+    while IFS='|' read -r c x d; do
+      printf '%-10s  %-14s  %s\n' "$c" "$x" "$d"
+    done < <(sqlite3 -separator '|' "$DB_PATH" \
+      "SELECT Currency, rtrim(rtrim(printf('%.6f', Xchg), '0'), '.'), Date
+       FROM $base WHERE Date <= '$dte' AND Currency = '$code'
+       ORDER BY Date DESC LIMIT 1")
+  done
+}
 
-  info "Database File: $DB_PATH" \
-       "File Size: $(numfmt --to=iec-i --suffix=B "$db_size" 2>/dev/null || echo "${db_size} bytes")" \
-       "Last Modified: $db_mtime"
+show_latest() {
+  local -- base=$1
+  shift
+  fetch_rates "$base" "$LATEST_URL?app_id=$OPENEXCHANGE_API_KEY"
 
-  # Get list of tables
-  local -a tables
-  mapfile -t tables < <(sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name" 2>/dev/null)
+  local -- ts updated=''
+  ts=$(jq -r '.timestamp // empty' "$TMPFILE")
+  [[ $ts =~ ^[0-9]+$ ]] && updated=$(TZ=UTC date -d "@$ts" '+%F %T UTC') ||:
+  info "Latest real-time rates (not stored), base $base${updated:+, updated $updated}"
 
-  if ((${#tables[@]} == 0)); then
-    info "No currency tables found in database"
-    return 0
+  if ((VERBOSE)); then
+    printf '%-10s  %s\n' 'Currency' 'Xchg'
+    printf '%-10s  %s\n' '----------' '--------------'
   fi
 
-  info "Currency Tables (${#tables[@]} total)" \
-       "------------------------------------"
-
-  local -i total_records=0
-  local -- table records min_date max_date last_updated currency_count
-
-  for table in "${tables[@]}"; do
-    # Get record count
-    records=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM $table" 2>/dev/null || echo 0)
-
-    if ((records)); then
-      # Get date range
-      min_date=$(sqlite3 "$DB_PATH" "SELECT MIN(Date) FROM $table" 2>/dev/null || echo "N/A")
-      max_date=$(sqlite3 "$DB_PATH" "SELECT MAX(Date) FROM $table" 2>/dev/null || echo "N/A")
-
-      # Get last update timestamp
-      last_updated=$(sqlite3 "$DB_PATH" "SELECT MAX(Updated) FROM $table" 2>/dev/null || echo "N/A")
-
-      # Get count of unique currencies
-      currency_count=$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT Currency) FROM $table" 2>/dev/null || echo 0)
-
-      success "  $table:"
-      info "    Records: $records" \
-       "    Currencies: $currency_count" \
-       "    Date Range: $min_date to $max_date" \
-       "    Last Updated: $last_updated"
-
-      total_records+=records
+  local -a codes=("$@")
+  ((${#codes[@]})) || codes=("${MU[@]}")
+  local -- code
+  for code in "${codes[@]}"; do
+    if [[ -n ${XRATES[$code]:-} ]]; then
+      printf '%-10s  %s\n' "$code" "${XRATES[$code]}"
     else
-      info "  $table: Empty"
+      warn "Currency $code not in API response"
     fi
   done
-
-  info '' "Summary" "-------" \
-       "Total Tables: ${#tables[@]}" \
-       "Total Records: $total_records"
-
-  # Calculate database efficiency
-  if ((total_records)); then
-    local -i bytes_per_record
-    bytes_per_record=$((db_size / total_records))
-    info "Average Record Size: $bytes_per_record bytes"
-  fi
-
-  return 0
 }
 
-#
-# db_vacuum - Optimize and compact database
-#
-# Performs SQLite VACUUM operation to:
-#   - Reclaim unused space
-#   - Defragment database file
-#   - Rebuild indexes
-#   - Improve query performance
-#
-# Returns:
-#   0 on success
-#   1 on failure
-#
-db_vacuum() {
-  info "Database Optimization" "=====================" ''
+update_db() {
+  local -- base=$1 dte=$2
 
-  # Check if database exists
-  if [[ ! -f "$DB_PATH" ]]; then
-    error "Database file not found: $DB_PATH"
-    return 1
-  fi
+  local -- db_dir=${DB_PATH%/*}
+  [[ -d $db_dir ]] || mkdir -p -- "$db_dir" \
+    || die 13 "Cannot create ${db_dir@Q} (create it manually with suitable permissions)"
 
-  # Get size before vacuum
-  local -i size_before
-  size_before=$(stat -c%s "$DB_PATH")
+  ensure_table "$base"
+  info "Base currency: $base" "Date: $dte"
+  fetch_rates "$base" "$HISTORICAL_URL$dte.json?app_id=$OPENEXCHANGE_API_KEY"
 
-  info "Database: $DB_PATH" \
-       "Size Before: $(numfmt --to=iec-i --suffix=B "$size_before" 2>/dev/null || echo "${size_before} bytes")"
-  info "Running VACUUM operation..."
-
-  if sqlite3 "$DB_PATH" "VACUUM;" 2>/dev/null; then
-    # Get size after vacuum
-    local -i size_after
-    size_after=$(stat -c%s "$DB_PATH")
-
-    local -i size_diff=$((size_before - size_after))
-    local -- percent_saved
-
-    if ((size_before)); then
-      percent_saved=$(echo "scale=2; ($size_diff * 100) / $size_before" | bc)
-    else
-      percent_saved="0"
-    fi
-
-    success "VACUUM completed successfully"
-    info "Results:" \
-         "  Size After: $(numfmt --to=iec-i --suffix=B "$size_after" 2>/dev/null || echo "${size_after} bytes")" \
-         "  Space Reclaimed: $(numfmt --to=iec-i --suffix=B "$size_diff" 2>/dev/null || echo "${size_diff} bytes") (${percent_saved}%)"
-
-    return 0
-  else
-    error "VACUUM operation failed"
-    return 1
-  fi
-}
-
-#
-# db_check - Verify database integrity
-#
-# Performs comprehensive integrity checks:
-#   - SQLite integrity_check
-#   - Schema validation
-#   - Foreign key check (if enabled)
-#   - Index validation
-#
-# Returns:
-#   0 if all checks pass
-#   1 if any check fails
-#
-db_check() {
-  info "Database Integrity Check" "========================" ''
-
-  # Check if database exists
-  if [[ ! -f "$DB_PATH" ]]; then
-    error "Database file not found: $DB_PATH"
-    return 1
-  fi
-
-  info "Database: $DB_PATH"
-
-  local -i errors=0
-
-  # 1. SQLite integrity check
-  info "1. SQLite Integrity Check" "-------------------------"
-
-  local -- integrity_result
-  integrity_result=$(sqlite3 "$DB_PATH" "PRAGMA integrity_check;" 2>&1)
-
-  if [[ "$integrity_result" == "ok" ]]; then
-    success "Database integrity: OK"
-  else
-    error "Database integrity: FAILED"
-    info  "  Details: $integrity_result"
-    errors+=1
-  fi
-
-  # 2. Schema validation
-  info "2. Schema Validation" "--------------------"
-
-  local -a tables
-  mapfile -t tables < <(sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name" 2>/dev/null)
-
-  if ((${#tables[@]} == 0)); then
-    info "No tables found (empty database)"
-  else
-    local -i schema_errors=0
-    local -- table actual_schema
-
-    for table in "${tables[@]}"; do
-      # Check if table name is a valid 3-letter currency code
-      if [[ ! "$table" =~ ^[A-Z]{3}$ ]]; then
-        warn "Invalid table name (not 3-letter code): $table"
-        schema_errors+=1
-        continue
-      fi
-
-      # Get table schema
-      actual_schema=$(sqlite3 "$DB_PATH" ".schema $table" 2>/dev/null)
-
-      # Check for required columns
-      if [[ "$actual_schema" =~ "id INTEGER PRIMARY KEY" ]] && \
-         [[ "$actual_schema" =~ "Date DATE NOT NULL" ]] && \
-         [[ "$actual_schema" =~ "Currency TEXT NOT NULL" ]] && \
-         [[ "$actual_schema" =~ "Unit INTEGER NOT NULL" ]] && \
-         [[ "$actual_schema" =~ "Xchg REAL NOT NULL" ]] && \
-         [[ "$actual_schema" =~ "Updated TIMESTAMP NOT NULL" ]]; then
-        success "  $table: Schema valid"
-      else
-        error "  $table: Schema invalid or incomplete"
-        schema_errors+=1
-        errors+=1
-      fi
-
-      # Check for required indexes
-      if [[ "$actual_schema" =~ "idx_${table}_currency" ]] && \
-         [[ "$actual_schema" =~ "idx_${table}_updated" ]]; then
-        : # Indexes present
-      else
-        warn "  $table: Missing indexes"
-        schema_errors+=1
-      fi
-    done
-
-    if ((schema_errors)); then
-      warn "Schema validation completed with $schema_errors issue(s)"
-    else
-      success "All table schemas valid"
-    fi
-  fi
-
-  # 3. Foreign key check
-  info "3. Foreign Key Check" "--------------------"
-
-  local -- fk_result
-  fk_result=$(sqlite3 "$DB_PATH" "PRAGMA foreign_key_check;" 2>&1)
-
-  if [[ -z "$fk_result" ]]; then
-    success "No foreign key violations"
-  else
-    error "Foreign key violations found:"
-    info "$fk_result"
-    errors+=1
-  fi
-
-  # 4. Quick count check
-  info "4. Quick Count Check" "--------------------"
-
-  local -i count_errors=0
-  for table in "${tables[@]}"; do
-    local -i count
-    count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM $table" 2>/dev/null || echo -1)
-
-    if ((count < 0)); then
-      error "  $table: Unable to count records"
-      count_errors+=1
-      errors+=1
-    fi
+  # Single multi-row INSERT; codes and values are regex-validated in fetch_rates
+  local -- code values=''
+  local -i count=0
+  for code in "${MU[@]}"; do
+    [[ -n ${XRATES[$code]:-} ]] || continue
+    values+="('$dte','$code',1,${XRATES[$code]},CURRENT_TIMESTAMP),"
+    count+=1
   done
+  ((count)) || die 1 'No rates to insert'
 
-  if ((count_errors)); then
-    error "$count_errors table(s) have read errors"
-  else
-    success "All tables readable"
-  fi
-
-  # Summary
-  info "Summary" "-------"
-
-  if ((errors)); then
-    error "CHECKS FAILED: $errors error(s) found"
-    info "Recommendations:" \
-      "  - Backup your database immediately" \
-      "  - Try running: openxchg --db-vacuum" \
-      "  - If problems persist, consider recreating affected tables"
-    return 1
-  fi
-
-  success "ALL CHECKS PASSED"
-  return 0
+  sqlite3 "$DB_PATH" \
+    "INSERT OR REPLACE INTO $base (Date, Currency, Unit, Xchg, Updated) VALUES ${values%,}" \
+    || die 1 'Database insert failed'
+  info "Update complete: $count currencies stored for $dte ($base table)"
 }
 
 main() {
-  local -- dte timestamp date mu base_currency
-  local -a positional_args=()
+  local -- dte=''
+  local -a args=()
 
-  # Auto-initialize on first run, then load config
-  auto_initialize
-  load_config "$CONFIG_FILE"
+  while (($#)); do case $1 in
+    -d|--date)    noarg "$@"; shift
+                  dte=$(TZ=UTC date +%F -d "$1" 2>/dev/null) || die 22 "Invalid date ${1@Q}" ;;
+    -a|--apikey)  noarg "$@"; shift; OPENEXCHANGE_API_KEY=$1 ;;
+    -l|--latest)  LATEST_MODE=1 ;;
+    -q|--quiet)   VERBOSE=0 ;;
+    -v|--verbose) VERBOSE=1 ;;
+    -V|--version) echo "$SCRIPT_NAME $VERSION"; exit 0 ;;
+    -h|--help)    usage; exit 0 ;;
+    --)           shift; args+=("$@"); break ;;
+    -[dalqvVh]?*) set -- "${1:0:2}" "-${1:2}" "${@:2}"; continue ;;
+    -*)           die 22 "Invalid option ${1@Q}" ;;
+    *)            args+=("$1") ;;
+  esac; shift; done
+  readonly VERBOSE LATEST_MODE
 
-  # Apply config defaults (can be overridden by CLI options later)
-  [[ -z "${CONFIG_DEFAULT_VERBOSE}" ]] || VERBOSE="${CONFIG_DEFAULT_VERBOSE}"
-  [[ -z "${CONFIG_API_KEY}" ]] || OPENEXCHANGE_API_KEY="${CONFIG_API_KEY}"
-  [[ -z "${CONFIG_DB_PATH}" ]] || DB_PATH="${CONFIG_DB_PATH}"
-  [[ -n "${CONFIG_AUTO_UPDATE_CURRENCY_LIST}" ]] || CONFIG_AUTO_UPDATE_CURRENCY_LIST="true"
-
-  # Validate DB_PATH is absolute (reject relative paths)
-  if [[ ! "$DB_PATH" =~ ^/ && ! "$DB_PATH" =~ ^\~ ]]; then
-    error "Database path must be absolute, got: $DB_PATH"
-    error "Update your config file to use an absolute path (e.g., /var/lib/openxchg/xchg.db)"
-    exit 1
+  if ((LATEST_MODE)) && [[ -n $dte ]]; then
+    die 22 'Options --latest and --date are mutually exclusive'
   fi
+  [[ -n $dte ]] || dte=$(TZ=UTC date +%F -d yesterday)
 
-  # Load currency list (from JSON if available, otherwise hardcoded)
-  load_currencies
-
-  # Auto-update currencies if enabled and needed
-  check_auto_update_currencies
-
-  while (($#)); do
-    case $1 in
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      -V|--version)
-        echo "$SCRIPT_NAME $VERSION"
-        exit 0
-        ;;
-      --show-config)
-        show_config
-        exit 0
-        ;;
-      --check-config)
-        validate_config "$CONFIG_FILE"
-        exit $?
-        ;;
-      --db-info)
-        db_info
-        exit $?
-        ;;
-      --db-vacuum)
-        db_vacuum
-        exit $?
-        ;;
-      --db-check)
-        db_check
-        exit $?
-        ;;
-      -U|--update-currencies)
-        fetch_currencies
-        exit $?
-        ;;
-      -v|--verbose)
-        VERBOSE=1
-        ;;
-      -q|--quiet)
-        VERBOSE=0
-        ;;
-      -d|--date)
-        [[ -n "${2:-}" ]] || die 1 "Option ${1@Q} requires an argument"
-        dte=$(TZ=UTC date +%F -d "$2" 2>/dev/null || echo '')
-        [[ -n "$dte" ]] || die 1 "Invalid date format ${2@Q}"
-        shift
-        ;;
-      -a|--apikey)
-        [[ -n "${2:-}" ]] || die 1 "Option ${1@Q} requires an argument"
-        OPENEXCHANGE_API_KEY=$2
-        shift
-        ;;
-      -l|--latest)
-        LATEST_MODE=1
-        ;;
-      -A|--all)
-        UPDATE_ALL_CURRENCIES=1
-        ;;
-      --)
-        shift
-        # Collect remaining args as positional
-        while (($#)); do
-          positional_args+=("$1")
-          shift
-        done
-        break
-        ;;
-
-      -[hVUCvqdalA]*) #shellcheck disable=SC2046
-        set -- '' $(printf -- "-%c " $(grep -o . <<<"${1:1}")) "${@:2}" ;;
-      -*)
-        die 22 "Invalid option ${1@Q}" ;;
-
-      *)
-        # Collect non-option argument and continue parsing
-        positional_args+=("$1")
-        ;;
-    esac
-    shift
+  local -i i
+  for ((i=0; i<${#args[@]}; i+=1)); do
+    args[i]=$(normalize_currency "${args[i]}")
+    validate_currency "${args[i]}"
   done
 
-  # Restore positional parameters
-  set -- "${positional_args[@]}"
-
-  # Validate option combinations
-  if ((LATEST_MODE)) && [[ -n "${dte:-}" ]]; then
-    die 1 'Options --latest and --date are mutually exclusive (latest fetches current rates)'
+  local -- base=IDR
+  if ((${#args[@]})); then
+    base=${args[0]}
+    args=("${args[@]:1}")
   fi
 
-  # Set default date if not specified by -d option (always use UTC)
-  # Use config value if set, otherwise default to 'yesterday'
-  if [[ -z "${dte:-}" ]]; then
-    local -- default_date_spec="${CONFIG_DEFAULT_DATE:-yesterday}"
-    dte="$(TZ=UTC date +%F -d "$default_date_spec")"
-  fi
+  TMPFILE=$(mktemp) || die 1 'Failed to create temp file'
 
-  # Get base currency (use config default if not specified on command line)
-  local -- default_base="${CONFIG_DEFAULT_BASE_CURRENCY:-IDR}"
-  base_currency="${1:-$default_base}"
-  base_currency=$(normalize_currency_code "$base_currency")
-  (($#==0)) || shift
-
-  # Ensure base currency table exists (creates if needed, not needed for LATEST mode)
-  ((LATEST_MODE)) || ensure_table_exists "$base_currency"
-
-  # LATEST MODE: Fetch and display current real-time rates (check before QUERY mode)
   if ((LATEST_MODE)); then
-    local -- api_url="$OPENEXCHANGE_LATEST_URL?app_id=$OPENEXCHANGE_API_KEY"
-
-    info "Fetching latest real-time rates for base currency: $base_currency"
-    info "Note: These are current rates, not finalized End-of-Day values"
-
-    wget -O "$TMPFILE" "$api_url" &>/dev/null \
-      || die 1 "Failed to fetch latest rates from ${OPENEXCHANGE_LATEST_URL@Q}"
-
-    # Parse JSON for rates and timestamp
-    eval "$(jq -r '.rates | to_entries[] | "\(.key)=\(.value)"' "$TMPFILE")"
-    local -i api_timestamp
-    api_timestamp=$(jq -r '.timestamp' "$TMPFILE")
-
-    # Convert Unix timestamp to human-readable UTC datetime
-    local -- updated_time
-    updated_time=$(TZ=UTC date -d "@$api_timestamp" '+%Y-%m-%d %H:%M:%S UTC')
-
-    # Get base currency rate
-    #shellcheck disable=SC2154
-    local -- base_rate_var="${base_currency}"
-    local -- base_rate="${!base_rate_var}"
-    [[ -n "$base_rate" ]] || die 1 "Base currency $base_currency not found in API response"
-
-    # Display header with timestamp
-    info "Latest Exchange Rates (Real-time)" \
-         "Base Currency: $base_currency" \
-         "Updated: $updated_time"
-    if ((VERBOSE)); then
-      printf "%-10s  %-14s\n" "Currency" "Xchg"
-      printf "%-10s  %-14s\n" "----------" "--------------"
-    fi
-    # Display rates (all currencies if none specified, or just requested ones)
-    if [[ -n "${1:-}" ]]; then
-      # Specific currencies requested
-      while (($#)); do
-        mu=$(normalize_currency_code "$1")
-        local -- currency_rate="${!mu:-}"
-
-        if [[ -n "$currency_rate" ]]; then
-          local -- xchg
-          xchg=$(bc <<< "scale=6; $base_rate/$currency_rate")
-          # Format without trailing zeros
-          xchg=$(echo "$xchg" | sed 's/0*$//' | sed 's/\.$//')
-          printf "%-10s  %-14s\n" "$mu" "$xchg"
-        else
-          error "Currency $mu not found in API response"
-        fi
-        shift
-      done
-    else
-      # Display all currencies
-      local -- currency_rate xchg
-      for mu in "${MU[@]}"; do
-        currency_rate="${!mu:-}"
-        [[ -n "$currency_rate" ]] || continue
-
-        xchg=$(bc <<< "scale=6; $base_rate/$currency_rate")
-        xchg=$(echo "$xchg" | sed 's/0*$//' | sed 's/\.$//')
-        printf "%-10s  %-14s\n" "$mu" "$xchg"
-      done
-    fi
-
-    return 0
-  fi
-
-  # QUERY MODE: Display rates for specified currencies
-  if [[ -n "${1:-}" ]]; then
-    # Print header once for all queries
-    if ((VERBOSE)); then
-      printf "%-10s  %-14s  %s\n" "Currency" "Xchg" "Date (UTC)"
-      printf "%-10s  %-14s  %s\n" "----------" "--------------" "-----------"
-    fi
-    while (($#)); do
-      mu=$(normalize_currency_code "$1")
-      # Query SQLite and format output (avoid scientific notation with rtrim)
-      sqlite3 -separator '|' "$DB_PATH" \
-        "SELECT Currency,
-                rtrim(rtrim(printf('%.6f', Xchg), '0'), '.') as Xchg,
-                Date
-         FROM $base_currency
-         WHERE Date <= '$dte' AND Currency = '$mu'
-         ORDER BY Date DESC
-         LIMIT 1" | \
-      while IFS='|' read -r currency xchg date; do
-        printf "%-10s  %-14s  %s\n" "$currency" "$xchg" "$date"
-      done
-      shift
-    done
-    return 0
-  fi
-
-  # UPDATE MODE: Fetch currencies from API and populate database
-  info "Base Currency: $base_currency"
-  info "Date: $dte"
-
-  # Get list of currencies to update (respects UPDATE_CURRENCIES config and --all flag)
-  local -- update_list
-  update_list=$(get_update_currency_list)
-  local -a update_currencies
-  read -ra update_currencies <<< "$update_list"
-
-  local -i update_count=${#update_currencies[@]}
-  local -i total_count=${#MU[@]}
-
-  if ((update_count < total_count)); then
-    info "Updating ${update_count}/${total_count} currencies (selective mode)"
+    show_latest "$base" "${args[@]}"
+  elif ((${#args[@]})); then
+    [[ -f $DB_PATH ]] || die 3 "Database not found ${DB_PATH@Q} (run '$SCRIPT_NAME ${base,,}' to create)"
+    query_rates "$base" "$dte" "${args[@]}"
   else
-    info "Updating all ${total_count} currencies"
+    update_db "$base" "$dte"
   fi
-
-  wget -O "$TMPFILE" "$OPENEXCHANGE_HISTORICAL_URL/$dte.json?app_id=$OPENEXCHANGE_API_KEY" &>/dev/null \
-      || die 1 "Bad Date? Expired API Key? No data returned from ${OPENEXCHANGE_HISTORICAL_URL@Q}"
-
-  # Parse JSON using jq and create bash variables (e.g., USD=1.0, EUR=0.86)
-  eval "$(jq -r '.rates | to_entries[] | "\(.key)=\(.value)"' "$TMPFILE")"
-
-  date="$dte"
-
-  # Get base currency rate from API response
-  #shellcheck disable=SC2154
-  local -- base_rate_var="${base_currency}"
-  local -- base_rate="${!base_rate_var}"
-
-  [[ -n "$base_rate" ]] || die 1 "Base currency $base_currency not found in API response"
-
-  # Process each currency in the update list
-  local -- currency_rate xchg
-  local -i processed=0
-  for mu in "${update_currencies[@]}"; do
-    currency_rate="${!mu:-}"  # Use :- to handle missing currencies gracefully
-
-    # Skip if currency rate not available in API response
-    if [[ -z "$currency_rate" ]]; then
-      warn "Currency $mu not found in API response, skipping"
-      continue
-    fi
-
-    # Calculate exchange rate relative to base currency
-    # Example: If base=IDR and currency=USD, calculate IDR/USD ratio
-    xchg=$(bc <<< "scale=6; $base_rate/$currency_rate")
-
-    # Insert or replace in SQLite database table
-    # Note: CURRENT_TIMESTAMP is in UTC (SQLite default behavior)
-    sqlite3 "$DB_PATH" \
-      "INSERT OR REPLACE INTO $base_currency (Date, Currency, Unit, Xchg, Updated)
-       VALUES ('$date', '$mu', 1, $xchg, CURRENT_TIMESTAMP)"
-
-    processed+=1
-    ((VERBOSE==0)) || info "Updated: $mu $date xchg=$xchg"
-  done
-
-  info "Update complete: ${processed}/${update_count} currencies processed for $date ($base_currency table)"
-}
-
-cleanup() {
-  local -i err=${1:=$?}
-  rm -f "$TMPFILE"
-  exit $err
-}
-
-usage() {
-  cat <<'ETX'
-openxchg - Multi-currency exchange rate database manager
-
-Fetches exchange rates from openexchangerates.org and stores them in SQLite.
-Each base currency gets its own table (e.g., IDR, USD, EUR, GBP). Supports
-> 170 currencies. Currency codes are case-insensitive. Options can appear
-anywhere in the command line.
-
-Usage: openxchg [OPTIONS] [base_currency] [CurrencyCode]...
-
-Options:
-  -d, --date DATE     Specify date for query/update (default: yesterday UTC)
-  -a, --apikey KEY    Use custom API key (overrides OPENEXCHANGE_API_KEY env)
-  -l, --latest        Fetch and display current real-time rates (display-only)
-  -A, --all           Update all currencies (overrides UPDATE_CURRENCIES config)
-
-  -U, --update-currencies
-                      Fetch and update currency list from API
-
-  --show-config       Display current effective configuration
-  --check-config      Validate configuration file (syntax, values, security)
-  --db-info           Display database statistics and information
-  --db-vacuum         Optimize and compact database (reclaim space)
-  --db-check          Verify database integrity and schema
-
-  -v, --verbose       Enable verbose output (default)
-  -q, --quiet         Disable verbose output
-  -V, --version       Display version information and exit
-  -h, --help          Display this help message and exit
-
-Arguments:
-  base_currency       Base currency (default: IDR, case-insensitive)
-  CurrencyCode        Currency codes to query (case-insensitive)
-
-Modes:
-  UPDATE: No currency codes given - fetches all rates for specified date
-  QUERY:  Currency codes given - displays rates from database
-  LATEST: With --latest flag - fetches current real-time rates (not stored)
-
-Examples:
-  # Query latest rates (yesterday) - case-insensitive
-  openxchg idr usd eur gbp
-  openxchg AUD usd sgd
-
-  # Query specific date
-  openxchg -d 2025-01-01 EUR usd gbp aud
-  openxchg eur -d today usd gbp      # Options can appear anywhere
-
-  # Update database for yesterday (all 169 currencies)
-  openxchg idr                       # Updates IDR table
-  openxchg eur                       # Updates EUR table
-  openxchg gbp                       # Updates GBP table
-
-  # Update specific date
-  openxchg -d 2025-01-01 usd
-  openxchg aud -d 2020-05-15         # Options anywhere works!
-
-  # Custom API key
-  openxchg -a YOUR_KEY eur
-  OPENEXCHANGE_API_KEY=YOUR_KEY openxchg eur
-
-  # Quiet mode (no progress messages)
-  openxchg -q idr usd eur
-  openxchg -q -d yesterday eur       # Update quietly
-
-  # Display current real-time rates
-  openxchg --latest idr usd eur gbp
-  openxchg -l aud usd sgd
-
-  # Display all latest rates for base currency
-  openxchg --latest eur              # Shows all 169 currencies
-
-  # Quiet latest rates
-  openxchg -q --latest idr usd eur
-
-  # Version info
-  openxchg --version
-
-  # Configuration management
-  openxchg --show-config             # Display effective configuration
-  openxchg --check-config            # Validate configuration file
-
-  # Currency management
-  openxchg -U                        # Fetch/update currency list from API
-  openxchg --update-currencies       # Same as -U
-
-  # Selective currency updates
-  openxchg idr                       # Updates currencies per UPDATE_CURRENCIES config
-  openxchg --all idr                 # Override config, update all 173 currencies
-  openxchg -A eur                    # Same as --all (short form)
-
-  # Database management
-  openxchg --db-info                 # Display database statistics
-  openxchg --db-vacuum               # Optimize and compact database
-  openxchg --db-check                # Verify database integrity
-
-Configuration:
-  System config: /etc/openxchg/config (INI format)
-  Database: /var/lib/openxchg/xchg.db
-  Currency list: /etc/openxchg/update-currencies.list
-
-  Configuration is auto-initialized on first run. System administrator can edit
-  /etc/openxchg/config to adjust system-wide settings.
-
-  Precedence (highest to lowest):
-    1. Command-line options
-    2. Environment variables (API key)
-    3. System config file
-    4. Built-in defaults
-
-  Supported settings:
-    [General]
-      DEFAULT_BASE_CURRENCY     - Default base currency (default: IDR)
-      DEFAULT_VERBOSE           - Verbosity 0=quiet, 1=verbose (default: 1)
-      DEFAULT_DATE              - Default date: yesterday, today, YYYY-MM-DD (default: yesterday)
-      AUTO_UPDATE_CURRENCY_LIST - Auto-update currencies daily: true/false (default: true)
-      UPDATE_CURRENCIES         - Currencies to update: ALL, CONFIGURED, or file path (default: /etc/openxchg/update-currencies.list)
-
-    [API]
-      API_KEY                   - OpenExchangeRates API key
-                                  RECOMMENDED: Use environment variable instead
-                                    export OPENEXCHANGE_API_KEY='your_key'
-                                    Add to ~/.bashrc for persistence
-
-    [Database]
-      DB_PATH                   - Database file path (default: /var/lib/openxchg/xchg.db)
-
-  Currency List Management:
-    The script maintains a currency list in /var/lib/openxchg/currencies.json
-
-    - Use -U to fetch the latest list from OpenExchangeRates API (169+ currencies)
-    - If AUTO_UPDATE_CURRENCY_LIST=true, automatically updates once per day
-    - Falls back to hardcoded list if currencies.json doesn't exist
-    - No API key required for currency list updates
-
-  Selective Currency Updates:
-    Control which currencies are updated in UPDATE mode using UPDATE_CURRENCIES:
-
-    - ALL (default): Update all 169 currencies
-    - CONFIGURED: Update currencies from currencies.json
-    - /etc/openxchg/update-currencies.list: System currency list (default)
-
-    System administrator can edit /etc/openxchg/update-currencies.list to customize
-    which currencies are updated for all users.
-
-    Override with --all flag to temporarily update all currencies:
-      openxchg --all idr                        # Ignores UPDATE_CURRENCIES setting
-
-    Note: QUERY mode can access any currency in database regardless of update list
-
-  First-time setup:
-    1. Run any openxchg command to auto-initialize:
-       openxchg --help
-
-    2. Set your API key (required for updates):
-       export OPENEXCHANGE_API_KEY='your_api_key_here'
-       echo "export OPENEXCHANGE_API_KEY='your_key'" >> ~/.bashrc
-
-    3. Get a free API key at:
-       https://openexchangerates.org/signup/free
-
-    4. Test with a query:
-       openxchg idr usd eur
-
-Output Format:
-  Currency    Xchg            Date (UTC)
-  ----------  --------------  -----------
-  USD         16712           2025-11-14
-  EUR         19426.865616    2025-11-14
-  GBP         21989.647286    2025-11-14
-
-Database:
-  Location: /usr/share/okusi/getkurs/xchg.db
-  Tables:   One per base currency (IDR, USD, EUR, etc.)
-  Columns:  id, Date, Currency, Unit, Xchg, Updated
-
-Timezone:
-  All dates are in UTC timezone, matching the OpenExchange API convention.
-  Relative dates (yesterday, today, 3 days ago) are calculated in UTC.
-  The API provides End-of-Day (EOD) rates for completed UTC days.
-
-  Note: Database records created before UTC implementation may contain
-        dates calculated in local timezone (WITA, UTC+8).
-
-Latest Mode:
-  The --latest option fetches current real-time exchange rates directly from
-  the API and displays them immediately. These rates are NOT stored in the
-  database and are NOT finalized End-of-Day (EOD) values. Use this for
-  quick reference of current market rates.
-
-  Latest rates include a timestamp showing when they were last updated by
-  the OpenExchangeRates API (typically updated hourly during market hours).
-
-  Note: --latest and --date options are mutually exclusive. Latest mode
-  always fetches the most recent available rates.
-ETX
 }
 
 main "$@"
