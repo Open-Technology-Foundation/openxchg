@@ -12,7 +12,8 @@ declare -r DATA_DIR=/var/lib/openxchg
 declare -r REPO_URL='https://raw.githubusercontent.com/Open-Technology-Foundation/openxchg/main'
 declare -r SCRIPT_NAME=openxchg
 
-_msg() { >&2 printf 'install: %s %s\n' "$1" "${@:2}"; }
+#shellcheck disable=SC2059
+_msg() { >&2 printf "install: $1 %s\n" "${@:2}"; }
 info() { _msg '◉' "$@"; }
 error() { _msg '✗' "$@"; }
 die() { (($# < 2)) || error "${@:2}"; exit "${1:-0}"; }
