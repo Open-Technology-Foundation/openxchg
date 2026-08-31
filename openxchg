@@ -200,7 +200,7 @@ show_latest() {
 
   local -- ts updated=''
   ts=$(jq -r '.timestamp // empty' "$TMPFILE")
-  [[ $ts =~ ^[0-9]+$ ]] && updated=$(TZ=UTC date -d "@$ts" '+%F %T UTC') ||:
+  [[ $ts =~ ^[0-9]+$ ]] && TZ=UTC printf -v updated '%(%F %T UTC)T' "$ts" ||:
   info "Latest real-time rates (not stored), base $base${updated:+, updated $updated}"
 
   if ((VERBOSE)); then
@@ -270,7 +270,8 @@ main() {
   if ((LATEST_MODE)) && [[ -n $dte ]]; then
     die 22 'Options --latest and --date are mutually exclusive'
   fi
-  [[ -n $dte ]] || dte=$(TZ=UTC date +%F -d yesterday)
+  # Yesterday UTC: no DST in UTC, so every UTC day is exactly 86400s
+  [[ -n $dte ]] || TZ=UTC printf -v dte '%(%F)T' $((EPOCHSECONDS - 86400))
 
   local -i i
   for ((i=0; i<${#args[@]}; i+=1)); do
