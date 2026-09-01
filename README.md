@@ -48,15 +48,23 @@ curl -sSL https://raw.githubusercontent.com/Open-Technology-Foundation/openxchg/
 
 Checks dependencies, installs `openxchg` to `/usr/local/bin`, and creates `/var/lib/openxchg/`.
 
-### Manual
+### From a Checkout (Makefile)
 
 ```bash
 git clone https://github.com/Open-Technology-Foundation/openxchg.git
 cd openxchg
 sudo apt-get install -y sqlite3 wget jq
-chmod +x openxchg
-sudo cp openxchg /usr/local/bin/
+sudo make install
 ```
+
+| Target | Action |
+|--------|--------|
+| `make install` | Install to `$(PREFIX)/bin` (default `/usr/local`), create `/var/lib/openxchg/` |
+| `make uninstall` | Remove the binary (keeps the database directory) |
+| `make check` | Verify `openxchg` resolves in PATH |
+| `make test` | Run the offline BATS suite |
+
+Supports `PREFIX` and `DESTDIR` for custom prefixes and staged/package builds (`make DESTDIR=/tmp/pkg install`).
 
 ### Getting an API Key
 
@@ -263,10 +271,10 @@ AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND BOB BRL 
 
 ## Testing
 
-BATS test suite, 31 tests, fully offline (mock `wget` + scratch databases + isolated config):
+BATS test suite, 33 tests, fully offline (mock `wget` + scratch databases + isolated config):
 
 ```bash
-./scripts/run_tests.sh
+make test          # or: ./scripts/run_tests.sh
 ```
 
 See [`tests/README.md`](tests/README.md) for details.
