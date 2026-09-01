@@ -103,6 +103,18 @@ teardown() { teardown_test_env; }
   assert_output '1'
 }
 
+@test "update without API key exits 19" {
+  run env -u OPENEXCHANGE_API_KEY "$OPENXCHG_BIN" idr
+  assert_failure 19
+  assert_output --partial 'No API key'
+}
+
+@test "query mode works without API key" {
+  "$OPENXCHG_BIN" -q idr
+  run env -u OPENEXCHANGE_API_KEY "$OPENXCHG_BIN" idr usd
+  assert_success
+}
+
 @test "update reports API error from response body" {
   MOCK_API_ERROR=1 run "$OPENXCHG_BIN" idr
   assert_failure 1

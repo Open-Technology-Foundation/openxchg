@@ -25,7 +25,7 @@ declare -- DB_PATH=${DB_PATH:-/var/lib/openxchg/xchg.db}
 declare -- DEFAULT_BASE=IDR
 declare -r HISTORICAL_URL='https://openexchangerates.org/api/historical/'
 declare -r LATEST_URL='https://openexchangerates.org/api/latest.json'
-declare -- OPENEXCHANGE_API_KEY=${OPENEXCHANGE_API_KEY:-'2a9989da6985438481f9a5f3801d84d1'}
+declare -- OPENEXCHANGE_API_KEY=${OPENEXCHANGE_API_KEY:-}
 
 # Supported currencies (openexchangerates.org)
 declare -ra MU=( AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND BOB BRL BSD BTC BTN BWP BYN BZD CAD CDF CHF CLF CLP CNH CNY COP CRC CUC CUP CVE CZK DJF DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GGP GHS GIP GMD GNF GTQ GYD HKD HNL HRK HTG HUF IDR ILS IMP INR IQD IRR ISK JEP JMD JOD JPY KES KGS KHR KMF KPW KRW KWD KYD KZT LAK LBP LKR LRD LSL LYD MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD OMR PAB PEN PGK PHP PKR PLN PYG QAR RON RSD RUB RWF SAR SBD SCR SDG SEK SGD SHP SLL SOS SRD SSP STD STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD TWD TZS UAH UGX USD UYU UZS VND VUV WST XAF XAG XAU XCD XDR XOF XPD XPF XPT YER ZAR ZMW ZWL )
@@ -171,6 +171,10 @@ SQL
 # values survive the read loop, so XRATES is safe to embed in SQL.
 fetch_rates() {
   local -- base=$1 url=$2
+  [[ -n $OPENEXCHANGE_API_KEY ]] || die 19 \
+    'No API key set (query mode needs none)' \
+    'Provide one via: OPENEXCHANGE_API_KEY env var, -a KEY, or a config file' \
+    'Free key: https://openexchangerates.org/signup/free'
   wget -qO "$TMPFILE" "$url" || die 1 'Failed to fetch rates from API'
   jq empty "$TMPFILE" 2>/dev/null || die 1 'Invalid JSON received from API'
 
